@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.2
+Versión: 1.3
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -65,13 +65,16 @@ GEMINI_PROMPT_GENERAR = """Sos un editor de guiones en español. Te paso el subt
 Tu tarea:
 1. Corregí los errores de reconocimiento (palabras que claramente están mal, cortadas o repetidas por ser subtítulo automático).
 2. Reescribí el texto cambiando palabras (sinónimos) y la estructura de las oraciones, manteniendo EXACTAMENTE la misma historia, los mismos hechos y el mismo sentido. No inventes ni agregues información nueva.
-3. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, y evitá oraciones de más de 20 palabras.
-4. Devolvé SOLO el guion final, sin comentarios, sin explicaciones, sin encabezados.
+3. NO resumas ni acortes el texto: el guion final debe cubrir todos los mismos hechos, momentos y detalles del original, con una extensión similar (no una versión condensada).
+4. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, y evitá oraciones de más de 20 palabras.
+5. Devolvé SOLO el guion final, sin comentarios, sin explicaciones, sin encabezados.
 
 Subtítulo original:
 {texto}"""
 
 GEMINI_PROMPT_REVISAR = """Sos un editor revisando un guion que vos mismo reescribiste. Releélo con ojo crítico y fijate si quedó algo raro: frases repetidas, puntuación que no ayuda a una lectura natural en voz alta, o algo que se haya alejado del sentido original. Corregí lo que haga falta.
+
+Importante: NO acortes ni resumas el guion en esta revisión. Debe conservar todos los hechos y detalles, con una extensión similar a la que tenía antes de esta revisión.
 
 Devolvé SOLO la versión final pulida del guion, sin comentarios ni explicaciones.
 
@@ -87,7 +90,10 @@ def log(msg):
 def _llamar_gemini(prompt_template, texto):
     if not GEMINI_API_KEY:
         return texto
-    body = {"contents": [{"parts": [{"text": prompt_template.format(texto=texto)}]}]}
+    body = {
+        "contents": [{"parts": [{"text": prompt_template.format(texto=texto)}]}],
+        "generationConfig": {"maxOutputTokens": 8192},
+    }
     resp = requests.post(
         f"{GEMINI_URL}?key={GEMINI_API_KEY}",
         json=body,
@@ -98,15 +104,55 @@ def _llamar_gemini(prompt_template, texto):
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
+PALABRAS_POR_PARTE = 1400  # ~ lo que Gemini puede parafrasear bien de una
+
+
+def _partir_en_bloques(texto, palabras_por_parte=PALABRAS_POR_PARTE):
+    """Corta el texto en bloques de tamaño manejable, respetando fin de
+    oración (no corta a mitad de una frase) para no romper el ritmo."""
+    oraciones = re.split(r"(?<=[.!?])\s+", texto)
+    bloques = []
+    actual = []
+    palabras_actual = 0
+    for oracion in oraciones:
+        n = len(oracion.split())
+        if palabras_actual + n > palabras_por_parte and actual:
+            bloques.append(" ".join(actual))
+            actual = []
+            palabras_actual = 0
+        actual.append(oracion)
+        palabras_actual += n
+    if actual:
+        bloques.append(" ".join(actual))
+    return bloques
+
+
 def parafrasear(texto_crudo):
     if not GEMINI_API_KEY:
         log("⚠️  Sin GEMINI_API_KEY, se sube el subtítulo tal cual (sin parafrasear)")
         return texto_crudo
-    log("Parafraseando con Gemini (pasada 1/2)...")
-    texto = _llamar_gemini(GEMINI_PROMPT_GENERAR, texto_crudo)
-    log("Puliendo con Gemini (pasada 2/2)...")
-    texto = _llamar_gemini(GEMINI_PROMPT_REVISAR, texto)
-    return texto
+
+    bloques = _partir_en_bloques(texto_crudo)
+    if len(bloques) > 1:
+        log(f"Texto largo: se divide en {len(bloques)} partes para parafrasear sin perder contenido")
+
+    partes_finales = []
+    for i, bloque in enumerate(bloques, start=1):
+        if len(bloques) > 1:
+            log(f"  Parte {i}/{len(bloques)}: parafraseando con Gemini (pasada 1/2)...")
+        else:
+            log("Parafraseando con Gemini (pasada 1/2)...")
+        texto = _llamar_gemini(GEMINI_PROMPT_GENERAR, bloque)
+        if len(bloques) > 1:
+            log(f"  Parte {i}/{len(bloques)}: puliendo con Gemini (pasada 2/2)...")
+        else:
+            log("Puliendo con Gemini (pasada 2/2)...")
+        texto = _llamar_gemini(GEMINI_PROMPT_REVISAR, texto)
+        partes_finales.append(texto.strip())
+
+    # Une las partes en un solo guion continuo, sin encabezados ni marcas
+    # de división, para que se lea como un texto único y fluido.
+    return " ".join(partes_finales)
 
 
 # --- yt-dlp: listar videos y bajar subtítulo automático -----------------
