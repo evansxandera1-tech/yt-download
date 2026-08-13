@@ -4,14 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       canal:
-        description: "Link/@usuario del canal, o link directo de un video"
+        description: "Selecciona el canal a procesar"
         required: true
-        type: string
+        type: choice
+        options:
+          - "https://youtube.com/@relatosredditx"
+          - "https://youtube.com/@historiasredditya"
+          - "https://youtube.com/@renatahistorias"
+          - "https://youtube.com/@dosisdesubforos-b1w9z"
       max_videos:
         description: "Cuántos videos nuevos procesar"
         required: false
-        default: "1"
+        default: "50"
         type: string
+
+permissions:
+  contents: write
 
 jobs:
   procesar:
@@ -29,6 +37,11 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      - name: Preparar cookies
+        run: |
+          echo "# Netscape HTTP Cookie File" > cookies.txt
+          echo "${{ secrets.YT_COOKIES }}" >> cookies.txt
+
       - name: Procesar canal
         env:
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
@@ -36,3 +49,11 @@ jobs:
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
+
+      - name: Guardar historial
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          touch descargados.txt
+          git add descargados.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Actualizar historial de descargas" && git push)
