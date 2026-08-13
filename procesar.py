@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.4
+Versión: 1.5
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -94,13 +94,30 @@ def _llamar_gemini(prompt_template, texto):
         "contents": [{"parts": [{"text": prompt_template.format(texto=texto)}]}],
         "generationConfig": {"maxOutputTokens": 8192},
     }
-    resp = requests.post(
-        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-        json=body,
-        timeout=GEMINI_TIMEOUT_SEG,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+
+    ultimo_error = None
+    for intento in range(1, 6):
+        try:
+            resp = requests.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=body,
+                timeout=GEMINI_TIMEOUT_SEG,
+            )
+            if resp.status_code == 429:
+                espera = 20 * intento
+                log(f"  ⏳ Gemini: límite de peticiones (429). Esperando {espera}s antes de reintentar ({intento}/5)...")
+                time.sleep(espera)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.RequestException as e:
+            ultimo_error = e
+            log(f"  ⚠️  Error llamando a Gemini (intento {intento}/5): {e}")
+            time.sleep(10 * intento)
+    else:
+        log(f"  ❌ Gemini no respondió tras varios intentos ({ultimo_error}). Se usa el texto sin cambios para este tramo.")
+        return texto
 
     candidatos = data.get("candidates") or []
     if not candidatos:
