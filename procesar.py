@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.3
+Versión: 1.4
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -101,7 +101,21 @@ def _llamar_gemini(prompt_template, texto):
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    candidatos = data.get("candidates") or []
+    if not candidatos:
+        motivo = data.get("promptFeedback", {}).get("blockReason", "desconocido")
+        log(f"  ⚠️  Gemini no devolvió candidatos (motivo: {motivo}). Se usa el texto sin cambios para este tramo.")
+        return texto
+
+    candidato = candidatos[0]
+    partes = candidato.get("content", {}).get("parts")
+    if not partes:
+        motivo = candidato.get("finishReason", "desconocido")
+        log(f"  ⚠️  Gemini devolvió una respuesta sin contenido (finishReason: {motivo}). Se usa el texto sin cambios para este tramo.")
+        return texto
+
+    return partes[0].get("text", texto).strip()
 
 
 PALABRAS_POR_PARTE = 1400  # ~ lo que Gemini puede parafrasear bien de una
@@ -150,8 +164,6 @@ def parafrasear(texto_crudo):
         texto = _llamar_gemini(GEMINI_PROMPT_REVISAR, texto)
         partes_finales.append(texto.strip())
 
-    # Une las partes en un solo guion continuo, sin encabezados ni marcas
-    # de división, para que se lea como un texto único y fluido.
     return " ".join(partes_finales)
 
 
