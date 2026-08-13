@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.1
+Versión: 1.2
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -131,6 +131,18 @@ def _opts_cookies():
     return {}
 
 
+def _opts_base():
+    """Opciones comunes para evitar el error 'Requested format is not
+    available' que tira YouTube desde 2026 (exige PO token / bloquea el
+    streaming clásico en varios clientes). Como acá nunca se descarga
+    video, se le pide a yt-dlp que ignore la falta de formatos de video
+    y que use el cliente 'tv', que por ahora no pide ese token."""
+    return {
+        "ignore_no_formats_error": True,
+        "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
+    }
+
+
 def listar_videos_canal(url_canal, max_videos):
     url_videos = _extraer_nombre_canal(url_canal)
     if not url_videos.endswith("/videos"):
@@ -139,7 +151,11 @@ def listar_videos_canal(url_canal, max_videos):
         "extract_flat": True,
         "playlistend": max_videos,
         "quiet": True,
-        "extractor_args": {"youtubetab": {"skip": ["authcheck"]}},
+        **_opts_base(),
+        "extractor_args": {
+            "youtubetab": {"skip": ["authcheck"]},
+            **_opts_base()["extractor_args"],
+        },
         **_opts_cookies(),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -171,6 +187,7 @@ def bajar_subtitulo(video_url):
         "subtitlesformat": "vtt",
         "outtmpl": os.path.join(CARPETA_SALIDA, "%(id)s.%(ext)s"),
         "quiet": True,
+        **_opts_base(),
         **_opts_cookies(),
     }
     ultimo_error = None
