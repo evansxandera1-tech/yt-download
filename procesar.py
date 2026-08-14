@@ -1,31 +1,33 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.6
+Versión: 2.1
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
 
-  1. Recibe un canal o link de video de YouTube (por variable de entorno,
-     pasada desde el input del workflow).
-  2. Lista los videos recientes del canal (o usa el video puntual si se
+  1. Recibe uno o varios canales/links de YouTube separados por coma (por
+     variable de entorno, pasada desde el input del workflow).
+  2. Lista los videos recientes de cada canal (o usa el video puntual si se
      pasó un link directo) y baja el subtítulo automático en español de
      cada uno con yt-dlp (sin descargar audio ni video).
-  3. Manda ese texto a Gemini para que lo parafrasee/corrija en una sola
-     pasada por bloque.
-  4. Sube el .txt final a una carpeta de Google Drive, usando las
-     credenciales OAuth ya generadas (refresh token reutilizado, no pide
-     login en cada corrida).
+  3. Si un canal ya no tiene contenido nuevo (todos sus videos recientes
+     ya están en el historial), pasa automáticamente al siguiente canal
+     de la lista hasta completar la cantidad de videos pedida (max_videos)
+     o hasta agotar todos los canales.
+  4. Sube el texto TAL CUAL (crudo, sin parafrasear) a una carpeta de
+     Google Drive. El parafraseo con IA queda como un paso aparte,
+     opcional, para hacer después ya con el texto seguro en Drive.
+     Si se quiere volver a parafrasear en este mismo script, activar
+     la variable de entorno PARAFRASEAR=1.
+  5. Guarda el ID de cada video procesado en descargados.txt para no
+     repetirlo en corridas futuras.
 
 Requiere estas variables de entorno (Secrets del repo en GitHub Actions):
     GDRIVE_CLIENT_ID
     GDRIVE_CLIENT_SECRET
     GDRIVE_REFRESH_TOKEN
     GEMINI_API_KEY
-
-Y estos inputs del workflow (ver .github/workflows/procesar.yml):
-    canal        -> link o @usuario del canal, o link directo de un video
-    max_videos   -> cuántos videos nuevos procesar en esta corrida
 """
 
 import io
@@ -40,7 +42,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# --- Config -----------------------------------------------------------
 CARPETA_SALIDA = "transcripciones"
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
@@ -61,10 +62,23 @@ Tu tarea, en un solo paso:
 3. NO resumas ni acortes el texto: el guion final debe cubrir todos los mismos hechos, momentos y detalles del original, con una extensión similar (no una versión condensada).
 4. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, evitá oraciones de más de 20 palabras, y evitá paréntesis, guiones largos o comillas anidadas que puedan confundir a un lector de voz.
 5. Releélo una vez antes de responder y corregí frases repetidas o puntuación que no ayude a una lectura natural en voz alta.
-6. Devolvé SOLO el guion final, sin comentarios, sin explicaciones, sin encabezados.
+6. Devolvé ÚNICAMENTE el guion final en texto corrido. No agregues notas, comentarios, encabezados, aclaraciones sobre el formato, ni ningún texto que no sea parte de la historia misma. Tu respuesta debe terminar en el último punto de la historia, sin nada después.
 
 Subtítulo original:
 {texto}"""
+
+
+_PATRONES_ARTEFACTO = [
+    r"\n\s*\*+\s*\*?.*$",
+    r"\n\s*(Nota|Draft(ing)?|Aclaraci[oó]n)[:\-].*$",
+]
+
+
+def _limpiar_artefactos(texto):
+    limpio = texto
+    for patron in _PATRONES_ARTEFACTO:
+        limpio = re.sub(patron, "", limpio, flags=re.IGNORECASE | re.DOTALL)
+    return limpio.strip()
 
 
 def log(msg):
@@ -76,7 +90,7 @@ def _llamar_gemini(prompt_template, texto):
         return texto
     body = {
         "contents": [{"parts": [{"text": prompt_template.format(texto=texto)}]}],
-        "generationConfig": {"maxOutputTokens": 8192},
+        "generationConfig": {"maxOutputTokens": 32768},
     }
 
     ultimo_error = None
@@ -110,22 +124,24 @@ def _llamar_gemini(prompt_template, texto):
         return texto
 
     candidato = candidatos[0]
+    finish_reason = candidato.get("finishReason", "")
+    if finish_reason == "MAX_TOKENS":
+        log("  ⚠️  Gemini cortó la respuesta por límite de tokens de salida (MAX_TOKENS). El bloque puede haber quedado incompleto.")
+
     partes = candidato.get("content", {}).get("parts")
     if not partes:
-        motivo = candidato.get("finishReason", "desconocido")
+        motivo = finish_reason or "desconocido"
         log(f"  ⚠️  Gemini devolvió una respuesta sin contenido (finishReason: {motivo}). Se usa el texto sin cambios para este tramo.")
         return texto
 
     return partes[0].get("text", texto).strip()
 
 
-PALABRAS_POR_PARTE = 4000  # bloques grandes para minimizar llamadas a Gemini
-PAUSA_ENTRE_LLAMADAS_SEG = 8  # espacia las peticiones para no chocar con el límite por minuto
+PALABRAS_POR_PARTE = 2200
+PAUSA_ENTRE_LLAMADAS_SEG = 8
 
 
 def _partir_en_bloques(texto, palabras_por_parte=PALABRAS_POR_PARTE):
-    """Corta el texto en bloques de tamaño manejable, respetando fin de
-    oración (no corta a mitad de una frase) para no romper el ritmo."""
     oraciones = re.split(r"(?<=[.!?])\s+", texto)
     bloques = []
     actual = []
@@ -159,6 +175,7 @@ def parafrasear(texto_crudo):
         else:
             log("Parafraseando con Gemini...")
         texto = _llamar_gemini(GEMINI_PROMPT_PARAFRASEAR, bloque)
+        texto = _limpiar_artefactos(texto)
         partes_finales.append(texto.strip())
         if i < len(bloques):
             time.sleep(PAUSA_ENTRE_LLAMADAS_SEG)
@@ -166,7 +183,6 @@ def parafrasear(texto_crudo):
     return " ".join(partes_finales)
 
 
-# --- yt-dlp: listar videos y bajar subtítulo automático -----------------
 def _extraer_nombre_canal(url):
     url = url.split("?")[0].strip().rstrip("/")
     return url
@@ -313,38 +329,80 @@ def _nombre_archivo_valido(titulo, video_id):
     return f"{limpio}__{video_id}.txt"
 
 
+HISTORIAL_PATH = "descargados.txt"
+
+
+def _cargar_historial():
+    if not os.path.isfile(HISTORIAL_PATH):
+        return set()
+    with open(HISTORIAL_PATH, "r", encoding="utf-8") as f:
+        return {linea.strip() for linea in f if linea.strip()}
+
+
+def _marcar_como_descargado(video_id):
+    with open(HISTORIAL_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{video_id}\n")
+
+
+PARAFRASEAR = os.environ.get("PARAFRASEAR", "0").strip() == "1"
+
+
 def main():
     if len(sys.argv) < 2:
-        log("Uso: python procesar.py <canal_o_link> [max_videos]")
+        log("Uso: python procesar.py <canal_o_link>[,<canal2>,<canal3>,...] [max_videos]")
         sys.exit(1)
-    canal_o_link = sys.argv[1].strip()
+    entrada = sys.argv[1].strip()
     max_videos = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    canales = [c.strip() for c in entrada.split(",") if c.strip()]
 
-    if es_link_de_video(canal_o_link):
-        videos = [{"id": None, "title": "video", "url": canal_o_link}]
-    else:
-        log(f"Listando hasta {max_videos} video(s) recientes de: {canal_o_link}")
-        videos = listar_videos_canal(canal_o_link, max_videos)
+    historial = _cargar_historial()
+    log(f"Historial: {len(historial)} video(s) ya procesados antes")
+    log("Modo: subir texto CRUDO (sin parafrasear)" if not PARAFRASEAR else "Modo: parafrasear con Gemini antes de subir")
+    log(f"Canales en la lista: {len(canales)} — objetivo: {max_videos} video(s) en total")
 
-    if not videos:
-        log("No se encontraron videos para procesar.")
-        return
+    procesados = 0
+    for idx_canal, canal_o_link in enumerate(canales, start=1):
+        if procesados >= max_videos:
+            break
+        restantes = max_videos - procesados
 
-    for i, video in enumerate(videos, start=1):
-        log(f"--- Video {i}/{len(videos)}: {video['title']} ---")
-        texto_crudo = bajar_subtitulo(video["url"])
-        if not texto_crudo:
-            log("  Sin subtítulo disponible, se saltea.")
+        if es_link_de_video(canal_o_link):
+            videos = [{"id": None, "title": "video", "url": canal_o_link}]
+        else:
+            log(f"[canal {idx_canal}/{len(canales)}] Listando videos recientes de: {canal_o_link}")
+            videos = listar_videos_canal(canal_o_link, restantes * 3)
+            videos = [v for v in videos if v["id"] not in historial][:restantes]
+
+        if not videos:
+            log("  Sin contenido nuevo en este canal. Se pasa al siguiente.")
             continue
-        texto_final = parafrasear(texto_crudo)
-        video_id = video["id"] or "video"
-        nombre_archivo = _nombre_archivo_valido(video["title"], video_id)
-        ruta_local = os.path.join(CARPETA_SALIDA, nombre_archivo)
-        with open(ruta_local, "w", encoding="utf-8") as f:
-            f.write(texto_final)
-        subir_a_drive(nombre_archivo, texto_final)
 
-    log("Listo.")
+        for i, video in enumerate(videos, start=1):
+            log(f"--- Video {i}/{len(videos)} ({canal_o_link}): {video['title']} ---")
+            texto_crudo = bajar_subtitulo(video["url"])
+            if not texto_crudo:
+                log("  Sin subtítulo disponible, se saltea.")
+                continue
+            if PARAFRASEAR:
+                texto_final = parafrasear(texto_crudo)
+            else:
+                texto_final = texto_crudo
+            video_id = video["id"] or "video"
+            nombre_archivo = _nombre_archivo_valido(video["title"], video_id)
+            ruta_local = os.path.join(CARPETA_SALIDA, nombre_archivo)
+            with open(ruta_local, "w", encoding="utf-8") as f:
+                f.write(texto_final)
+            subir_a_drive(nombre_archivo, texto_final)
+            if video["id"]:
+                _marcar_como_descargado(video["id"])
+            procesados += 1
+            if procesados >= max_videos:
+                break
+
+    if procesados == 0:
+        log("No hay videos nuevos para procesar en ningún canal de la lista.")
+    else:
+        log(f"Listo. {procesados} video(s) procesado(s) en total.")
 
 
 if __name__ == "__main__":
