@@ -1,0 +1,52 @@
+name: yt-download
+
+on:
+  schedule:
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+    inputs:
+      canal:
+        description: 'Canal(es) separados por coma (vacío = usar lista predeterminada del Secret)'
+        required: false
+      max_videos:
+        description: 'Cantidad total de videos a bajar'
+        required: false
+        default: '3'
+
+jobs:
+  descargar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install yt-dlp requests google-api-python-client google-auth
+
+      - name: Restaurar historial de descargas
+        uses: actions/cache@v4
+        with:
+          path: descargados.txt
+          key: descargados-${{ github.run_id }}
+          restore-keys: |
+            descargados-
+
+      - name: Ejecutar
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          CANAL="${{ github.event.inputs.canal }}"
+          if [ -z "$CANAL" ]; then
+            CANAL="${{ secrets.CANALES_YT }}"
+          fi
+          MAXV="${{ github.event.inputs.max_videos }}"
+          if [ -z "$MAXV" ]; then
+            MAXV=3
+          fi
+          python procesar.py "$CANAL" "$MAXV"
