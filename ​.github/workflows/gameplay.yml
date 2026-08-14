@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       canal:
-        description: "Canal de gameplay a descargar"
+        description: 'Canal de gameplay a descargar'
         required: true
         type: choice
         options:
-          - "https://www.youtube.com/@OrbitalNCG"
-          - "https://www.youtube.com/@Naybr"
+          - 'https://www.youtube.com/@OrbitalNCG'
+          - 'https://www.youtube.com/@Naybr'
       max_videos:
-        description: "Cantidad de videos"
+        description: 'Cantidad de videos'
         required: false
-        default: "1"
+        default: '1'
         type: string
 
 permissions:
