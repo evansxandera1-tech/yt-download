@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
 =============================================================================
-Versión: 1.5
+Versión: 1.6
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -11,8 +11,8 @@ depender del celular/Termux. Flujo:
   2. Lista los videos recientes del canal (o usa el video puntual si se
      pasó un link directo) y baja el subtítulo automático en español de
      cada uno con yt-dlp (sin descargar audio ni video).
-  3. Manda ese texto a Gemini para que lo parafrasee/corrija (misma
-     lógica en dos pasadas que ya usa TRANSCRIBIR_WEB).
+  3. Manda ese texto a Gemini para que lo parafrasee/corrija en una sola
+     pasada por bloque.
   4. Sube el .txt final a una carpeta de Google Drive, usando las
      credenciales OAuth ya generadas (refresh token reutilizado, no pide
      login en cada corrida).
@@ -26,13 +26,6 @@ Requiere estas variables de entorno (Secrets del repo en GitHub Actions):
 Y estos inputs del workflow (ver .github/workflows/procesar.yml):
     canal        -> link o @usuario del canal, o link directo de un video
     max_videos   -> cuántos videos nuevos procesar en esta corrida
-
-Uso local (para probar):
-    export GDRIVE_CLIENT_ID=...
-    export GDRIVE_CLIENT_SECRET=...
-    export GDRIVE_REFRESH_TOKEN=...
-    export GEMINI_API_KEY=...
-    python procesar.py "https://www.youtube.com/@canal" 3
 """
 
 import io
@@ -51,7 +44,7 @@ from googleapiclient.http import MediaIoBaseUpload
 CARPETA_SALIDA = "transcripciones"
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
-DRIVE_FOLDER_NAME = "yt-download"  # carpeta en Drive donde se sube todo
+DRIVE_FOLDER_NAME = "yt-download"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELO = os.environ.get("GEMINI_MODELO", "gemini-3.6-flash").strip()
@@ -60,25 +53,17 @@ GEMINI_URL = (
 )
 GEMINI_TIMEOUT_SEG = 240
 
-GEMINI_PROMPT_GENERAR = """Sos un editor de guiones en español. Te paso el subtítulo automático de un video de YouTube, que puede tener palabras mal reconocidas o mal puntuadas.
+GEMINI_PROMPT_PARAFRASEAR = """Sos un editor de guiones en español. Te paso el subtítulo automático de un video de YouTube, que puede tener palabras mal reconocidas o mal puntuadas.
 
-Tu tarea:
+Tu tarea, en un solo paso:
 1. Corregí los errores de reconocimiento (palabras que claramente están mal, cortadas o repetidas por ser subtítulo automático).
 2. Reescribí el texto cambiando palabras (sinónimos) y la estructura de las oraciones, manteniendo EXACTAMENTE la misma historia, los mismos hechos y el mismo sentido. No inventes ni agregues información nueva.
 3. NO resumas ni acortes el texto: el guion final debe cubrir todos los mismos hechos, momentos y detalles del original, con una extensión similar (no una versión condensada).
-4. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, y evitá oraciones de más de 20 palabras.
-5. Devolvé SOLO el guion final, sin comentarios, sin explicaciones, sin encabezados.
+4. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, evitá oraciones de más de 20 palabras, y evitá paréntesis, guiones largos o comillas anidadas que puedan confundir a un lector de voz.
+5. Releélo una vez antes de responder y corregí frases repetidas o puntuación que no ayude a una lectura natural en voz alta.
+6. Devolvé SOLO el guion final, sin comentarios, sin explicaciones, sin encabezados.
 
 Subtítulo original:
-{texto}"""
-
-GEMINI_PROMPT_REVISAR = """Sos un editor revisando un guion que vos mismo reescribiste. Releélo con ojo crítico y fijate si quedó algo raro: frases repetidas, puntuación que no ayuda a una lectura natural en voz alta, o algo que se haya alejado del sentido original. Corregí lo que haga falta.
-
-Importante: NO acortes ni resumas el guion en esta revisión. Debe conservar todos los hechos y detalles, con una extensión similar a la que tenía antes de esta revisión.
-
-Devolvé SOLO la versión final pulida del guion, sin comentarios ni explicaciones.
-
-Guion a revisar:
 {texto}"""
 
 
@@ -86,7 +71,6 @@ def log(msg):
     print(f"[yt-download] {msg}", flush=True)
 
 
-# --- Gemini: parafraseo en dos pasadas (misma lógica que TRANSCRIBIR_WEB) --
 def _llamar_gemini(prompt_template, texto):
     if not GEMINI_API_KEY:
         return texto
@@ -135,7 +119,8 @@ def _llamar_gemini(prompt_template, texto):
     return partes[0].get("text", texto).strip()
 
 
-PALABRAS_POR_PARTE = 1400  # ~ lo que Gemini puede parafrasear bien de una
+PALABRAS_POR_PARTE = 4000  # bloques grandes para minimizar llamadas a Gemini
+PAUSA_ENTRE_LLAMADAS_SEG = 8  # espacia las peticiones para no chocar con el límite por minuto
 
 
 def _partir_en_bloques(texto, palabras_por_parte=PALABRAS_POR_PARTE):
@@ -165,21 +150,18 @@ def parafrasear(texto_crudo):
 
     bloques = _partir_en_bloques(texto_crudo)
     if len(bloques) > 1:
-        log(f"Texto largo: se divide en {len(bloques)} partes para parafrasear sin perder contenido")
+        log(f"Texto largo: se divide en {len(bloques)} parte(s) para parafrasear sin perder contenido")
 
     partes_finales = []
     for i, bloque in enumerate(bloques, start=1):
         if len(bloques) > 1:
-            log(f"  Parte {i}/{len(bloques)}: parafraseando con Gemini (pasada 1/2)...")
+            log(f"  Parte {i}/{len(bloques)}: parafraseando con Gemini...")
         else:
-            log("Parafraseando con Gemini (pasada 1/2)...")
-        texto = _llamar_gemini(GEMINI_PROMPT_GENERAR, bloque)
-        if len(bloques) > 1:
-            log(f"  Parte {i}/{len(bloques)}: puliendo con Gemini (pasada 2/2)...")
-        else:
-            log("Puliendo con Gemini (pasada 2/2)...")
-        texto = _llamar_gemini(GEMINI_PROMPT_REVISAR, texto)
+            log("Parafraseando con Gemini...")
+        texto = _llamar_gemini(GEMINI_PROMPT_PARAFRASEAR, bloque)
         partes_finales.append(texto.strip())
+        if i < len(bloques):
+            time.sleep(PAUSA_ENTRE_LLAMADAS_SEG)
 
     return " ".join(partes_finales)
 
@@ -198,20 +180,12 @@ COOKIES_PATH = "cookies.txt"
 
 
 def _opts_cookies():
-    """Si existe cookies.txt (generado por el workflow) y no está vacío,
-    lo agrega a las opciones de yt-dlp para evitar bloqueos por
-    age-restriction o límites de YouTube. Si no existe, no rompe nada."""
     if os.path.isfile(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
         return {"cookiefile": COOKIES_PATH}
     return {}
 
 
 def _opts_base():
-    """Opciones comunes para evitar el error 'Requested format is not
-    available' que tira YouTube desde 2026 (exige PO token / bloquea el
-    streaming clásico en varios clientes). Como acá nunca se descarga
-    video, se le pide a yt-dlp que ignore la falta de formatos de video
-    y que use el cliente 'tv', que por ahora no pide ese token."""
     return {
         "ignore_no_formats_error": True,
         "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
@@ -243,7 +217,7 @@ def listar_videos_canal(url_canal, max_videos):
         duracion = e.get("duration") or 0
         video_url = e.get("url") or f"https://www.youtube.com/watch?v={e.get('id')}"
         if duracion and duracion <= 60:
-            continue  # descarta Shorts
+            continue
         if "/shorts/" in video_url:
             continue
         videos.append({"id": e.get("id"), "title": e.get("title", "sin_titulo"), "url": video_url})
@@ -253,8 +227,6 @@ def listar_videos_canal(url_canal, max_videos):
 
 
 def bajar_subtitulo(video_url):
-    """Baja el subtítulo automático en español (sin audio/video) y
-    devuelve el texto plano. Reintenta ante fallas transitorias."""
     opts = {
         "skip_download": True,
         "writeautomaticsub": True,
@@ -277,7 +249,7 @@ def bajar_subtitulo(video_url):
                     texto = _vtt_a_texto(ruta)
                     os.remove(ruta)
                     return texto
-            return None  # no había subtítulo disponible
+            return None
         except Exception as e:
             ultimo_error = e
             log(f"  ⚠️  Intento {intento}/3 falló: {e}")
@@ -287,8 +259,6 @@ def bajar_subtitulo(video_url):
 
 
 def _vtt_a_texto(ruta_vtt):
-    """Convierte un .vtt en texto plano, sin timestamps ni duplicados
-    de línea (típico de los subtítulos automáticos de YouTube)."""
     with open(ruta_vtt, "r", encoding="utf-8") as f:
         lineas = f.readlines()
     vistas = set()
@@ -297,14 +267,13 @@ def _vtt_a_texto(ruta_vtt):
         linea = linea.strip()
         if not linea or "-->" in linea or linea.startswith(("WEBVTT", "Kind:", "Language:")):
             continue
-        linea = re.sub(r"<[^>]+>", "", linea)  # saca tags de estilo
+        linea = re.sub(r"<[^>]+>", "", linea)
         if linea and linea not in vistas:
             vistas.add(linea)
             partes.append(linea)
     return " ".join(partes)
 
 
-# --- Google Drive: subir el .txt final -----------------------------------
 def _cliente_drive():
     creds = Credentials(
         None,
@@ -339,7 +308,6 @@ def subir_a_drive(nombre_archivo, texto):
     log(f"  ☁️  Subido a Drive: {nombre_archivo}")
 
 
-# --- Main ------------------------------------------------------------
 def _nombre_archivo_valido(titulo, video_id):
     limpio = re.sub(r"[^\w\s-]", "", titulo).strip().replace(" ", "_")[:80]
     return f"{limpio}__{video_id}.txt"
