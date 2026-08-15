@@ -2,5 +2,4 @@ yt-dlp>=2026.8.1
 requests>=2.31.0
 google-api-python-client>=2.100.0
 google-auth>=2.23.0
-yt-dlp-ytse
 bgutil-ytdlp-pot-provider
