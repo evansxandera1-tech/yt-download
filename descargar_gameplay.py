@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.7
+descargar_gameplay.py — v1.8
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -97,6 +97,17 @@ detallado (quiet=False, no_warnings=False, verbose=True) para ver
 esos avisos en el log de GitHub Actions y poder diagnosticar bien.
 Es TEMPORAL: una vez encontrado el motivo real, hay que volver a
 poner quiet=True/no_warnings=True para no llenar el log de ruido.
+
+v1.8: con el modo detallado se vio el error real:
+"[pot:bgutil:http] Unknown error reaching GET /ping ... Unsupported
+url scheme: ''". La causa era que "base_url" se pasaba como texto
+plano en vez de lista (yt-dlp espera que TODOS los valores de
+extractor_args sean listas), así que el plugin del PO Token nunca
+pudo hablar con el servidor bgutil-provider y por eso ningún cliente
+conseguía token, sin importar qué player_client se usara. Se corrigió
+a "base_url": ["http://127.0.0.1:4416"] (con corchetes). También se
+volvió a poner quiet=True/no_warnings=True ya que el diagnóstico ya
+se hizo.
 """
 
 import io
@@ -287,15 +298,14 @@ def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
 
 def _opciones_comunes():
     opciones = {
-        "quiet": False,
-        "no_warnings": False,
-        "verbose": True,
+        "quiet": True,
+        "no_warnings": True,
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb"],
                 "formats": ["sabr"],
             },
-            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
         "retries": 5,
         "fragment_retries": 5,
