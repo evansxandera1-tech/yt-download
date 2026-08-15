@@ -1,5 +1,4 @@
 name: Procesar canal de YouTube
-
 on:
   workflow_dispatch:
     inputs:
@@ -22,10 +21,8 @@ on:
         required: false
         default: ""
         type: string
-
 permissions:
   contents: write
-
 jobs:
   procesar:
     runs-on: ubuntu-latest
@@ -33,20 +30,16 @@ jobs:
     steps:
       - name: Descargar repo
         uses: actions/checkout@v4
-
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Instalar dependencias
         run: pip install -r requirements.txt
-
       - name: Preparar cookies
         run: |
           echo "# Netscape HTTP Cookie File" > cookies.txt
           echo "${{ secrets.YT_COOKIES }}" >> cookies.txt
-
       - name: Procesar canal
         env:
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
@@ -55,11 +48,9 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-         PARAFRASEAR: "1"
+          PARAFRASEAR: "1"
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
-        
       - name: Guardar historial
         run: |
           git config --global user.name "GitHub Actions Bot"
@@ -67,7 +58,6 @@ jobs:
           touch descargados.txt
           git add descargados.txt
           git diff --quiet && git diff --staged --quiet || (git commit -m "Actualizar historial de descargas" && git pull --rebase && git push)
-
   descargar_gameplay:
     runs-on: ubuntu-latest
     timeout-minutes: 340
@@ -79,21 +69,17 @@ jobs:
     steps:
       - name: Descargar repo
         uses: actions/checkout@v4
-
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Instalar dependencias
         run: pip install -r requirements.txt
-
       - name: Preparar cookies
         run: |
           echo "# Netscape HTTP Cookie File" > cookies.txt
           echo "${{ secrets.YOUTUBE_COOKIES }}" >> cookies.txt
           cp cookies.txt ~/cookies.txt
-
       - name: Descargar gameplay
         env:
           DRIVE_CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
