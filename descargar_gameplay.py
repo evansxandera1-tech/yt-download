@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.5
+descargar_gameplay.py — v1.7
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -83,6 +83,20 @@ seguridad: si se acumulan 5 descargas fallidas seguidas, la corrida
 se corta sola en vez de seguir insistiendo video por video (antes
 antes se probaba TODO el pool de 60 videos aunque todos fallaran por
 el mismo motivo).
+
+v1.6: el modo "sabr" del plugin yt-dlp-ytse necesita el cliente
+"mweb" para funcionar bien (la propia documentación del plugin lo
+recomienda); con "tv"/"android"/"web" seguía sin encontrar formatos
+aunque el plugin ya estaba cargando bien. Se cambió player_client a
+["mweb"] en los dos lugares donde se arma la config de yt-dlp.
+
+v1.7: con mweb el error siguió igual, pero "quiet"/"no_warnings"
+estaban tapando el aviso real de yt-dlp (el que explica el motivo
+exacto: PO Token, cookies vencidas, bloqueo, etc.). Se activó modo
+detallado (quiet=False, no_warnings=False, verbose=True) para ver
+esos avisos en el log de GitHub Actions y poder diagnosticar bien.
+Es TEMPORAL: una vez encontrado el motivo real, hay que volver a
+poner quiet=True/no_warnings=True para no llenar el log de ruido.
 """
 
 import io
@@ -273,11 +287,12 @@ def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
 
 def _opciones_comunes():
     opciones = {
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
+        "verbose": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv", "android", "web"],
+                "player_client": ["mweb"],
                 "formats": ["sabr"],
             },
             "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
@@ -302,7 +317,7 @@ def listar_videos_canal(url_canal, limite):
         "playlistend": limite,
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv", "android", "web"],
+                "player_client": ["mweb"],
                 "formats": ["sabr"],
             },
             "youtubetab": {"skip": ["authcheck"]},
