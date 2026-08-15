@@ -1,7 +1,7 @@
 """
-yt-download — Descargar subtítulos, parafrasear con Gemini y subir a Drive
+yt-download — Descargar subtítulos, parafrasear con Groq y subir a Drive
 =============================================================================
-Versión: 2.1
+Versión: 2.2
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -27,7 +27,15 @@ Requiere estas variables de entorno (Secrets del repo en GitHub Actions):
     GDRIVE_CLIENT_ID
     GDRIVE_CLIENT_SECRET
     GDRIVE_REFRESH_TOKEN
-    GEMINI_API_KEY
+    GROQ_API_KEY          (principal para parafrasear, si PARAFRASEAR=1)
+    GROQ_API_KEY_2        (respaldo, opcional)
+    GEMINI_API_KEY        (respaldo si Groq falla, opcional)
+
+v2.2: el parafraseo (cuando PARAFRASEAR=1) ahora usa Groq (Llama 3.3
+70B) como motor principal, igual que paraphrase_engine.py, en vez de
+Gemini. Gemini queda como respaldo si Groq falla (las dos keys) o si
+no hay GROQ_API_KEY cargada. Mismo prompt de corrección/parafraseo de
+antes, sin cambios en el criterio de reescritura.
 """
 
 import io
@@ -47,6 +55,14 @@ os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
 DRIVE_FOLDER_NAME = "yt-download"
 
+# ---------- Groq (motor principal de parafraseo) ----------
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2", "").strip()
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MAX_REINTENTOS_GROQ = 3
+
+# ---------- Gemini (respaldo, solo si Groq falla o no hay key) ----------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELO = os.environ.get("GEMINI_MODELO", "gemini-3.6-flash").strip()
 GEMINI_URL = (
@@ -54,7 +70,7 @@ GEMINI_URL = (
 )
 GEMINI_TIMEOUT_SEG = 240
 
-GEMINI_PROMPT_PARAFRASEAR = """Sos un editor de guiones en español. Te paso el subtítulo automático de un video de YouTube, que puede tener palabras mal reconocidas o mal puntuadas.
+PROMPT_PARAFRASEAR = """Sos un editor de guiones en español. Te paso el subtítulo automático de un video de YouTube, que puede tener palabras mal reconocidas o mal puntuadas.
 
 Tu tarea, en un solo paso:
 1. Corregí los errores de reconocimiento (palabras que claramente están mal, cortadas o repetidas por ser subtítulo automático).
@@ -85,11 +101,33 @@ def log(msg):
     print(f"[yt-download] {msg}", flush=True)
 
 
-def _llamar_gemini(prompt_template, texto):
-    if not GEMINI_API_KEY:
-        return texto
+def _llamar_groq(texto, api_key):
     body = {
-        "contents": [{"parts": [{"text": prompt_template.format(texto=texto)}]}],
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": PROMPT_PARAFRASEAR.format(texto=texto)}],
+        "temperature": 0.7,
+    }
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
+            timeout=60,
+        )
+    except requests.exceptions.RequestException as e:
+        log(f"  ⚠️  Error de red llamando a Groq: {e}")
+        return None
+    if resp.status_code == 200:
+        return resp.json()["choices"][0]["message"]["content"]
+    log(f"  ⚠️  Groq error {resp.status_code}: {resp.text[:200]}")
+    return None
+
+
+def _llamar_gemini(texto):
+    if not GEMINI_API_KEY:
+        return None
+    body = {
+        "contents": [{"parts": [{"text": PROMPT_PARAFRASEAR.format(texto=texto)}]}],
         "generationConfig": {"maxOutputTokens": 32768},
     }
 
@@ -114,14 +152,14 @@ def _llamar_gemini(prompt_template, texto):
             log(f"  ⚠️  Error llamando a Gemini (intento {intento}/5): {e}")
             time.sleep(10 * intento)
     else:
-        log(f"  ❌ Gemini no respondió tras varios intentos ({ultimo_error}). Se usa el texto sin cambios para este tramo.")
-        return texto
+        log(f"  ❌ Gemini no respondió tras varios intentos ({ultimo_error}).")
+        return None
 
     candidatos = data.get("candidates") or []
     if not candidatos:
         motivo = data.get("promptFeedback", {}).get("blockReason", "desconocido")
-        log(f"  ⚠️  Gemini no devolvió candidatos (motivo: {motivo}). Se usa el texto sin cambios para este tramo.")
-        return texto
+        log(f"  ⚠️  Gemini no devolvió candidatos (motivo: {motivo}).")
+        return None
 
     candidato = candidatos[0]
     finish_reason = candidato.get("finishReason", "")
@@ -131,10 +169,29 @@ def _llamar_gemini(prompt_template, texto):
     partes = candidato.get("content", {}).get("parts")
     if not partes:
         motivo = finish_reason or "desconocido"
-        log(f"  ⚠️  Gemini devolvió una respuesta sin contenido (finishReason: {motivo}). Se usa el texto sin cambios para este tramo.")
-        return texto
+        log(f"  ⚠️  Gemini devolvió una respuesta sin contenido (finishReason: {motivo}).")
+        return None
 
-    return partes[0].get("text", texto).strip()
+    return partes[0].get("text", "").strip()
+
+
+def _corregir_bloque(bloque):
+    """Groq (con las 2 keys, con reintentos) primero; Gemini de respaldo si todo falla."""
+    for api_key in [k for k in (GROQ_API_KEY, GROQ_API_KEY_2) if k]:
+        for intento in range(1, MAX_REINTENTOS_GROQ + 1):
+            resultado = _llamar_groq(bloque, api_key)
+            if resultado and resultado.strip():
+                return _limpiar_artefactos(resultado)
+            log(f"  ⏳ Groq intento {intento}/{MAX_REINTENTOS_GROQ} sin resultado válido, reintentando...")
+            time.sleep(3)
+
+    log("  ⚠️  Groq falló (o sin GROQ_API_KEY), probando con Gemini de respaldo...")
+    resultado = _llamar_gemini(bloque)
+    if resultado and resultado.strip():
+        return _limpiar_artefactos(resultado)
+
+    log("  ❌ Groq y Gemini fallaron para este bloque. Se usa el texto sin cambios.")
+    return bloque
 
 
 PALABRAS_POR_PARTE = 2200
@@ -160,8 +217,8 @@ def _partir_en_bloques(texto, palabras_por_parte=PALABRAS_POR_PARTE):
 
 
 def parafrasear(texto_crudo):
-    if not GEMINI_API_KEY:
-        log("⚠️  Sin GEMINI_API_KEY, se sube el subtítulo tal cual (sin parafrasear)")
+    if not GROQ_API_KEY and not GEMINI_API_KEY:
+        log("⚠️  Sin GROQ_API_KEY ni GEMINI_API_KEY, se sube el subtítulo tal cual (sin parafrasear)")
         return texto_crudo
 
     bloques = _partir_en_bloques(texto_crudo)
@@ -171,11 +228,10 @@ def parafrasear(texto_crudo):
     partes_finales = []
     for i, bloque in enumerate(bloques, start=1):
         if len(bloques) > 1:
-            log(f"  Parte {i}/{len(bloques)}: parafraseando con Gemini...")
+            log(f"  Parte {i}/{len(bloques)}: parafraseando...")
         else:
-            log("Parafraseando con Gemini...")
-        texto = _llamar_gemini(GEMINI_PROMPT_PARAFRASEAR, bloque)
-        texto = _limpiar_artefactos(texto)
+            log("Parafraseando...")
+        texto = _corregir_bloque(bloque)
         partes_finales.append(texto.strip())
         if i < len(bloques):
             time.sleep(PAUSA_ENTRE_LLAMADAS_SEG)
@@ -357,7 +413,7 @@ def main():
 
     historial = _cargar_historial()
     log(f"Historial: {len(historial)} video(s) ya procesados antes")
-    log("Modo: subir texto CRUDO (sin parafrasear)" if not PARAFRASEAR else "Modo: parafrasear con Gemini antes de subir")
+    log("Modo: subir texto CRUDO (sin parafrasear)" if not PARAFRASEAR else "Modo: parafrasear (Groq, respaldo Gemini) antes de subir")
     log(f"Canales en la lista: {len(canales)} — objetivo: {max_videos} video(s) en total")
 
     procesados = 0
