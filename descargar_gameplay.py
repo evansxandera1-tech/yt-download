@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.3
+descargar_gameplay.py — v1.4
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -63,6 +63,14 @@ guardado supere el tope, se borra el video más viejo ya completado
 (de Drive y del historial) para hacerle lugar. Así, mientras el canal
 siga subiendo contenido nuevo, el script siempre tiene dónde
 descargar, sin que el Drive crezca sin control.
+
+v1.4: YouTube empezó a forzar "SABR streaming", lo que rompe la
+mayoría de los formatos que pedía yt-dlp incluso con el PO Token del
+bgutil-provider funcionando bien (error "Requested format is not
+available" en casi todos los videos). Se agregó el argumento
+extractor_args["youtube"]["formats"] = ["missing_pot"], que le
+permite a yt-dlp usar formatos aunque falte el PO token en vez de
+descartarlos de plano.
 """
 
 import io
@@ -256,7 +264,10 @@ def _opciones_comunes():
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "youtube": {"player_client": ["tv", "android", "web"]},
+            "youtube": {
+                "player_client": ["tv", "android", "web"],
+                "formats": ["missing_pot"],
+            },
             "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
         },
         "retries": 5,
@@ -278,7 +289,10 @@ def listar_videos_canal(url_canal, limite):
         "extract_flat": True,
         "playlistend": limite,
         "extractor_args": {
-            "youtube": {"player_client": ["tv", "android", "web"]},
+            "youtube": {
+                "player_client": ["tv", "android", "web"],
+                "formats": ["missing_pot"],
+            },
             "youtubetab": {"skip": ["authcheck"]},
         },
     })
