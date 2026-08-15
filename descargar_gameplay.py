@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.8
+descargar_gameplay.py — v2.0
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -108,6 +108,19 @@ conseguía token, sin importar qué player_client se usara. Se corrigió
 a "base_url": ["http://127.0.0.1:4416"] (con corchetes). También se
 volvió a poner quiet=True/no_warnings=True ya que el diagnóstico ya
 se hizo.
+
+v1.9: el plugin yt-dlp-ytse (el que agrega el modo "sabr") se rompió
+por incompatibilidad de versión con el yt-dlp nightly que se estaba
+instalando. Como el bug real era el de base_url (ya arreglado en
+v1.8) y no algo específico de SABR, se saca la dependencia de
+yt-dlp-ytse y el "formats": ["sabr"]; con el PO Token de bgutil
+funcionando bien y el cliente mweb alcanza, sin depender de un
+plugin extra que puede desincronizarse de versión.
+
+v2.0: se volvió a activar modo detallado (quiet=False,
+no_warnings=False, verbose=True) para diagnosticar por qué sigue
+fallando después del fix de base_url en v1.8/v1.9. TEMPORAL, igual
+que en v1.7.
 """
 
 import io
@@ -298,12 +311,12 @@ def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
 
 def _opciones_comunes():
     opciones = {
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
+        "verbose": True,
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb"],
-                "formats": ["sabr"],
             },
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
@@ -328,7 +341,6 @@ def listar_videos_canal(url_canal, limite):
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb"],
-                "formats": ["sabr"],
             },
             "youtubetab": {"skip": ["authcheck"]},
         },
