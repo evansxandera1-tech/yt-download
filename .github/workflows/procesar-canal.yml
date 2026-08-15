@@ -15,7 +15,7 @@ on:
       max_videos:
         description: "Cuántos videos nuevos procesar"
         required: false
-        default: "50"
+        default: "5"
         type: string
       limite_videos_prueba_gameplay:
         description: "Gameplay: límite de videos solo para modo prueba (vacío = sin límite)"
@@ -55,7 +55,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PARAFRASEAR: ${{ vars.PARAFRASEAR }}
+          PARAFRASEAR: "1"
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
 
       - name: Guardar historial
@@ -99,4 +99,4 @@ jobs:
           DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           LIMITE_VIDEOS_PRUEBA: ${{ inputs.limite_videos_prueba_gameplay }}
-        run: python descargar_gameplay-3.py
+        run: python descargar_gameplay.py
