@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.4
+descargar_gameplay.py — v1.5
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -71,6 +71,18 @@ available" en casi todos los videos). Se agregó el argumento
 extractor_args["youtube"]["formats"] = ["missing_pot"], que le
 permite a yt-dlp usar formatos aunque falte el PO token en vez de
 descartarlos de plano.
+
+v1.5: el fix de v1.4 no fue suficiente porque el problema real es el
+protocolo SABR que YouTube está forzando ahora (bloquea los formatos
+viejos directamente, no es solo un tema de PO Token). Se agregó
+soporte para el plugin yt-dlp-ytse (hay que instalarlo aparte con
+"pip install -U yt-dlp-ytse" en el workflow) y se cambió el
+extractor_args de "formats": ["missing_pot"] a "formats": ["sabr"],
+que habilita el protocolo nuevo. También se agregó un corte de
+seguridad: si se acumulan 5 descargas fallidas seguidas, la corrida
+se corta sola en vez de seguir insistiendo video por video (antes
+antes se probaba TODO el pool de 60 videos aunque todos fallaran por
+el mismo motivo).
 """
 
 import io
@@ -266,7 +278,7 @@ def _opciones_comunes():
         "extractor_args": {
             "youtube": {
                 "player_client": ["tv", "android", "web"],
-                "formats": ["missing_pot"],
+                "formats": ["sabr"],
             },
             "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
         },
@@ -291,7 +303,7 @@ def listar_videos_canal(url_canal, limite):
         "extractor_args": {
             "youtube": {
                 "player_client": ["tv", "android", "web"],
-                "formats": ["missing_pot"],
+                "formats": ["sabr"],
             },
             "youtubetab": {"skip": ["authcheck"]},
         },
@@ -368,6 +380,8 @@ def main():
     total_bytes_corrida = 0
     videos_descargados = 0
     tope_alcanzado = False
+    fallos_seguidos = 0
+    LIMITE_FALLOS_SEGUIDOS = 5
 
     for url_canal in CANALES:
         if tope_alcanzado:
@@ -403,6 +417,11 @@ def main():
                 ancho, alto = obtener_dimensiones(video_id)
             except Exception as e:
                 log(f"  ⚠️ No se pudo chequear orientación de '{titulo}': {e}")
+                fallos_seguidos += 1
+                if fallos_seguidos >= LIMITE_FALLOS_SEGUIDOS:
+                    log(f"  🛑 {LIMITE_FALLOS_SEGUIDOS} fallos seguidos, se corta la corrida "
+                        f"(probablemente YouTube está bloqueando las descargas ahora mismo).")
+                    tope_alcanzado = True
                 continue
 
             if ancho and alto and alto > ancho:
@@ -442,6 +461,7 @@ def main():
 
                 total_bytes_corrida += tamano_bytes
                 videos_descargados += 1
+                fallos_seguidos = 0
                 log(f"    ✅ Listo ({nombre_canal}). "
                     f"Acumulado esta corrida: {round(total_bytes_corrida / (1024 ** 3), 2)} GB")
 
@@ -456,6 +476,11 @@ def main():
                 traceback.print_exc()
                 # Se deja "en_progreso" en el historial a propósito: la
                 # próxima corrida lo va a reintentar.
+                fallos_seguidos += 1
+                if fallos_seguidos >= LIMITE_FALLOS_SEGUIDOS:
+                    log(f"    🛑 {LIMITE_FALLOS_SEGUIDOS} fallos seguidos, se corta la corrida "
+                        f"(probablemente YouTube está bloqueando las descargas ahora mismo).")
+                    tope_alcanzado = True
             finally:
                 if os.path.exists(ruta_temp):
                     os.remove(ruta_temp)
