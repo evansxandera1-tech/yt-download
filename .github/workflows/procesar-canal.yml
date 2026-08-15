@@ -57,6 +57,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
          PARAFRASEAR: "1"
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
         
       - name: Guardar historial
