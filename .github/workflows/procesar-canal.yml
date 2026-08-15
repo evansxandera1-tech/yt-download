@@ -99,4 +99,4 @@ jobs:
           DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           LIMITE_VIDEOS_PRUEBA: ${{ inputs.limite_videos_prueba_gameplay }}
-        run: python descargar_gameplay.py
+        run: python descargar_gameplay-3.py
