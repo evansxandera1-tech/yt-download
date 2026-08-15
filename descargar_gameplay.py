@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v2.0
+descargar_gameplay.py — v2.1
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -121,6 +121,15 @@ v2.0: se volvió a activar modo detallado (quiet=False,
 no_warnings=False, verbose=True) para diagnosticar por qué sigue
 fallando después del fix de base_url en v1.8/v1.9. TEMPORAL, igual
 que en v1.7.
+
+v2.1: con el modo detallado se vio que el PO Token de mweb SÍ se
+generó bien ("Retrieved a gvs PO Token"), pero después fallaba el
+"n challenge" de YouTube por falta de un runtime de JavaScript (EJS)
+para resolverlo. Se agregó "js_runtimes": {"node": {}} (los runners
+de GitHub Actions ya traen Node.js instalado, no hace falta
+instalar nada nuevo) y "remote_components": {"ejs:github"} para que
+yt-dlp baje los scripts solucionadores desde GitHub. Se volvió a
+poner quiet=True/no_warnings=True.
 """
 
 import io
@@ -311,15 +320,16 @@ def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
 
 def _opciones_comunes():
     opciones = {
-        "quiet": False,
-        "no_warnings": False,
-        "verbose": True,
+        "quiet": True,
+        "no_warnings": True,
         "extractor_args": {
             "youtube": {
                 "player_client": ["mweb"],
             },
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
+        "js_runtimes": {"node": {}},
+        "remote_components": {"ejs:github"},
         "retries": 5,
         "fragment_retries": 5,
         "sleep_interval_requests": 1,
