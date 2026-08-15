@@ -1,5 +1,5 @@
 """
-descargar_gameplay.py — v1.2
+descargar_gameplay.py — v1.3
 
 Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
 de video, pensado para correr en GitHub Actions (sin depender del
@@ -19,8 +19,12 @@ FLUJO:
      (vertical/horizontal) y lo sube a la subcarpeta correspondiente
      en Drive, dentro de la carpeta del canal.
   5) Marca el video "completo" en el historial y lo vuelve a subir.
-  6) Corta cuando la suma de lo descargado en esta corrida llega a
-     TOPE_BYTES (12 GB).
+  6) Después de cada subida, si el total guardado en Drive supera
+     ALMACENAMIENTO_MAXIMO_BYTES, borra el/los video(s) más viejo(s)
+     ya completados hasta volver a estar bajo el tope (rotación).
+  7) Corta la corrida cuando lo descargado en ESTA corrida llega a
+     TOPE_BYTES_POR_CORRIDA (para no pasarse del tiempo de GitHub
+     Actions).
 
 SECRETS necesarios en el repo de GitHub:
   DRIVE_CLIENT_ID
@@ -47,6 +51,18 @@ resolución (a veces 360p) para los clients tv/android/web. Se agregó
 soporte para un servidor bgutil-ytdlp-pot-provider (corre como
 service del workflow, puerto 4416) que genera el PO Token y permite
 acceder a los formatos de hasta 1080p.
+
+v1.3: el tope de 12 GB se estaba entendiendo mal: con solo 60 videos
+recientes por canal como candidatos, en una o pocas corridas se
+agotaba el pool completo (quedaba todo "completo" en el historial) y
+las corridas siguientes ya no tenían nada nuevo para bajar, aunque
+Drive no estuviera lleno de verdad. Se cambia el enfoque: ahora Drive
+funciona como un buffer rotativo de tamaño fijo (ALMACENAMIENTO_MAXIMO_
+BYTES). Cuando se sube un video nuevo y esto hace que el total
+guardado supere el tope, se borra el video más viejo ya completado
+(de Drive y del historial) para hacerle lugar. Así, mientras el canal
+siga subiendo contenido nuevo, el script siempre tiene dónde
+descargar, sin que el Drive crezca sin control.
 """
 
 import io
@@ -71,7 +87,17 @@ CANALES = [
 ]
 
 CALIDAD_MAXIMA = 1080  # alto máximo en píxeles
-TOPE_BYTES = 12 * 1024 ** 3  # 12 GB por corrida
+
+# Cuánto se descarga como máximo EN UNA SOLA CORRIDA (para no pasarse
+# del tiempo/recursos de GitHub Actions). No es el tope de Drive.
+TOPE_BYTES_POR_CORRIDA = 12 * 1024 ** 3  # 12 GB por corrida
+
+# Cuánto gameplay se mantiene guardado en Drive EN TOTAL. Si al subir
+# un video nuevo se supera esto, se borra el más viejo para hacerle
+# lugar (rotación). Podés subir este número si querés más backlog
+# disponible para Story Engine.
+ALMACENAMIENTO_MAXIMO_BYTES = 12 * 1024 ** 3  # 12 GB totales en Drive
+
 LIMITE_VIDEOS_POR_CANAL = 60  # cuántos videos recientes revisa por canal
 
 HISTORIAL_NOMBRE = "historial_gameplay.json"
@@ -169,7 +195,56 @@ def subir_historial(drive, historial, file_id):
 def subir_video(drive, ruta_local, nombre_archivo, carpeta_destino_id):
     metadata = {"name": nombre_archivo, "parents": [carpeta_destino_id]}
     media = MediaFileUpload(ruta_local, mimetype="video/mp4", resumable=True)
-    drive.files().create(body=metadata, media_body=media, fields="id").execute()
+    creado = drive.files().create(body=metadata, media_body=media, fields="id").execute()
+    return creado["id"]
+
+
+def borrar_video_drive(drive, file_id):
+    try:
+        drive.files().delete(fileId=file_id).execute()
+        return True
+    except Exception as e:
+        log(f"    ⚠️ No se pudo borrar de Drive ({file_id}): {e}")
+        return False
+
+
+# --------------------------------------------------------------------
+# ROTACIÓN DE ESPACIO
+# --------------------------------------------------------------------
+
+def _total_guardado_bytes(historial):
+    total = 0
+    for datos in historial.values():
+        if datos.get("estado") == "completo":
+            total += datos.get("tamano_mb", 0) * 1024 * 1024
+    return total
+
+
+def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
+    """Si lo guardado en Drive supera presupuesto_bytes, borra los
+    videos más viejos ya completados (en orden de finalización) hasta
+    volver a estar por debajo del tope."""
+    total = _total_guardado_bytes(historial)
+    if total <= presupuesto_bytes:
+        return historial_id
+
+    # Recorre el historial en el orden en que fue quedando "completo"
+    # (los dicts en Python respetan el orden de inserción).
+    for video_id, datos in list(historial.items()):
+        if total <= presupuesto_bytes:
+            break
+        if datos.get("estado") != "completo":
+            continue
+
+        file_id = datos.get("drive_file_id")
+        titulo = datos.get("titulo", video_id)
+        if file_id and borrar_video_drive(drive, file_id):
+            total -= datos.get("tamano_mb", 0) * 1024 * 1024
+            historial[video_id]["estado"] = "borrado_por_espacio"
+            historial[video_id].pop("drive_file_id", None)
+            log(f"    🗑️ Borrado por rotación (el más viejo): {titulo}")
+
+    return subir_historial(drive, historial, historial_id)
 
 
 # --------------------------------------------------------------------
@@ -303,7 +378,11 @@ def main():
             titulo = video["titulo"]
             registro = historial.get(video_id)
 
-            if registro and registro.get("estado") in ("completo", "omitido_vertical"):
+            # "borrado_por_espacio" también se salta: ya se usó una vez,
+            # no lo volvemos a bajar en la misma corrida/ventana de 60.
+            if registro and registro.get("estado") in (
+                "completo", "omitido_vertical", "borrado_por_espacio"
+            ):
                 continue
 
             try:
@@ -340,16 +419,23 @@ def main():
                 nombre_final = f"{video_id}__{_sanear_nombre_archivo(titulo)}.mp4"
 
                 log(f"    Subiendo a Drive ({round(tamano_bytes / (1024 * 1024), 1)} MB)...")
-                subir_video(drive, ruta_temp, nombre_final, carpeta_canal_id)
+                drive_file_id = subir_video(drive, ruta_temp, nombre_final, carpeta_canal_id)
 
                 historial[video_id]["estado"] = "completo"
                 historial[video_id]["tamano_mb"] = round(tamano_bytes / (1024 * 1024), 1)
+                historial[video_id]["drive_file_id"] = drive_file_id
                 historial_id = subir_historial(drive, historial, historial_id)
 
                 total_bytes_corrida += tamano_bytes
                 videos_descargados += 1
                 log(f"    ✅ Listo ({nombre_canal}). "
                     f"Acumulado esta corrida: {round(total_bytes_corrida / (1024 ** 3), 2)} GB")
+
+                # Rotación: si con este video se pasó el tope total de
+                # Drive, borra el/los más viejo(s) para hacerle lugar.
+                historial_id = liberar_espacio(
+                    drive, historial, historial_id, ALMACENAMIENTO_MAXIMO_BYTES
+                )
 
             except Exception as e:
                 log(f"    ❌ Error: {type(e).__name__}: {e}")
@@ -360,8 +446,9 @@ def main():
                 if os.path.exists(ruta_temp):
                     os.remove(ruta_temp)
 
-            if total_bytes_corrida >= TOPE_BYTES:
-                log(f"Tope de {TOPE_BYTES / (1024 ** 3):.0f} GB alcanzado, se corta la corrida.")
+            if total_bytes_corrida >= TOPE_BYTES_POR_CORRIDA:
+                log(f"Tope de {TOPE_BYTES_POR_CORRIDA / (1024 ** 3):.0f} GB por corrida "
+                    f"alcanzado, se corta la corrida.")
                 tope_alcanzado = True
             elif limite_prueba and videos_descargados >= limite_prueba:
                 log("Límite de prueba alcanzado, se corta la corrida.")
