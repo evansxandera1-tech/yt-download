@@ -55,9 +55,10 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PARAFRASEAR: "1"
+         PARAFRASEAR: "1"
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
-
+        
       - name: Guardar historial
         run: |
           git config --global user.name "GitHub Actions Bot"
