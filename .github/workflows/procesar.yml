@@ -27,6 +27,11 @@ jobs:
   procesar:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      bgutil-provider:
+        image: brainicism/bgutil-ytdlp-pot-provider
+        ports:
+          - 4416:4416
     steps:
       - name: Descargar repo
         uses: actions/checkout@v4
