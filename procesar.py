@@ -303,34 +303,37 @@ def listar_videos_canal(url_canal, max_videos):
 
 
 def bajar_subtitulo(video_url):
-    opts = {
-        "skip_download": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["es", "es-419", "es-ES"],
-        "subtitlesformat": "vtt",
-        "outtmpl": os.path.join(CARPETA_SALIDA, "%(id)s.%(ext)s"),
-        "quiet": True,
-        **_opts_base(),
-        **_opts_cookies(),
-    }
-    ultimo_error = None
-    for intento in range(1, 4):
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            for archivo in os.listdir(CARPETA_SALIDA):
-                if archivo.startswith(video_id) and archivo.endswith(".vtt"):
-                    ruta = os.path.join(CARPETA_SALIDA, archivo)
-                    texto = _vtt_a_texto(ruta)
-                    os.remove(ruta)
-                    return texto
-            return None
-        except Exception as e:
-            ultimo_error = e
-            log(f"  ⚠️  Intento {intento}/3 falló: {e}")
-            time.sleep(5 * intento)
-    log(f"  ❌ No se pudo bajar el subtítulo: {ultimo_error}")
+    for langs in (["es", "es-419", "es-ES"], ["en"]):
+        opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": langs,
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(CARPETA_SALIDA, "%(id)s.%(ext)s"),
+            "quiet": True,
+            **_opts_base(),
+            **_opts_cookies(),
+        }
+        ultimo_error = None
+        for intento in range(1, 4):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+                video_id = info.get("id")
+                for archivo in os.listdir(CARPETA_SALIDA):
+                    if archivo.startswith(video_id) and archivo.endswith(".vtt"):
+                        ruta = os.path.join(CARPETA_SALIDA, archivo)
+                        texto = _vtt_a_texto(ruta)
+                        os.remove(ruta)
+                        return texto
+                ultimo_error = None
+                break
+            except Exception as e:
+                ultimo_error = e
+                log(f"  ⚠️  Intento {intento}/3 falló ({langs}): {e}")
+                time.sleep(5 * intento)
+        if ultimo_error:
+            log(f"  ❌ No se pudo bajar el subtítulo en {langs}: {ultimo_error}")
     return None
 
 
