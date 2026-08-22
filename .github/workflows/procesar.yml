@@ -2,19 +2,10 @@ name: Procesar canal de YouTube
 on:
   workflow_dispatch:
     inputs:
-      canal:
-        description: "Selecciona el canal a procesar"
-        required: true
-        type: choice
-        options:
-          - "https://youtube.com/@relatosredditx"
-          - "https://youtube.com/@historiasredditya"
-          - "https://youtube.com/@renatahistorias"
-          - "https://youtube.com/@dosisdesubforos-b1w9z"
       max_videos:
-        description: "Cuántos videos nuevos procesar"
+        description: "Cuántos videos nuevos procesar en total (entre los 4 canales)"
         required: false
-        default: "5"
+        default: "50"
         type: string
   schedule:
     - cron: "0 12 * * *"
@@ -53,22 +44,13 @@ jobs:
           echo "${{ secrets.YT_COOKIES }}" >> cookies.txt
       - name: Refrescar historial antes de procesar
         run: git pull --rebase origin main
-      - name: Procesar canal (manual)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Procesar canales
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PARAFRASEAR: "0"
-        run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
-      - name: Procesar canales (automático diario)
-        if: github.event_name == 'schedule'
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PARAFRASEAR: "0"
-        run: python procesar.py "https://youtube.com/@relatosredditx,https://youtube.com/@historiasredditya,https://youtube.com/@renatahistorias,https://youtube.com/@dosisdesubforos-b1w9z" "30"
+        run: python procesar.py "https://youtube.com/@relatosredditx,https://youtube.com/@historiasredditya,https://youtube.com/@renatahistorias,https://youtube.com/@dosisdesubforos-b1w9z" "${{ inputs.max_videos || '30' }}"
       - name: Guardar historial
         run: |
           git config --global user.name "GitHub Actions Bot"

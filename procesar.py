@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Groq y subir a Drive
 =============================================================================
-Versión: 2.3
+Versión: 2.4
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -41,6 +41,9 @@ se venció/revocó (RefreshError: invalid_grant), por rclone (comando
 "rclone copy"), reutilizando el mismo remote "gdrive:" ya autenticado
 que usa gameplay_slither.py. Ya no se necesitan los secrets
 GDRIVE_CLIENT_ID/GDRIVE_CLIENT_SECRET/GDRIVE_REFRESH_TOKEN.
+
+v2.4: max_videos ahora tiene 50 como valor por defecto (antes era 1)
+cuando no se pasa como argumento.
 """
 
 import os
@@ -397,7 +400,7 @@ def main():
         log("Uso: python procesar.py <canal_o_link>[,<canal2>,<canal3>,...] [max_videos]")
         sys.exit(1)
     entrada = sys.argv[1].strip()
-    max_videos = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    max_videos = int(sys.argv[2]) if len(sys.argv) > 2 else 50
     canales = [c.strip() for c in entrada.split(",") if c.strip()]
 
     historial = _cargar_historial()
