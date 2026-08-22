@@ -16,6 +16,8 @@ on:
         required: false
         default: "5"
         type: string
+  schedule:
+    - cron: "0 12 * * *"
 concurrency:
   group: procesar-yt-download
   cancel-in-progress: false
@@ -46,13 +48,22 @@ jobs:
           echo "${{ secrets.YT_COOKIES }}" >> cookies.txt
       - name: Refrescar historial antes de procesar
         run: git pull --rebase origin main
-      - name: Procesar canal
+      - name: Procesar canal (manual)
+        if: github.event_name == 'workflow_dispatch'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PARAFRASEAR: "0"
         run: python procesar.py "${{ inputs.canal }}" "${{ inputs.max_videos }}"
+      - name: Procesar canales (automático diario)
+        if: github.event_name == 'schedule'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PARAFRASEAR: "0"
+        run: python procesar.py "https://youtube.com/@relatosredditx,https://youtube.com/@historiasredditya,https://youtube.com/@renatahistorias,https://youtube.com/@dosisdesubforos-b1w9z" "30"
       - name: Guardar historial
         run: |
           git config --global user.name "GitHub Actions Bot"
