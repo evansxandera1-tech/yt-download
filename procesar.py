@@ -1,7 +1,7 @@
 """
 yt-download — Descargar subtítulos, parafrasear con Groq y subir a Drive
 =============================================================================
-Versión: 2.2
+Versión: 2.3
 
 Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
 depender del celular/Termux. Flujo:
@@ -15,45 +15,49 @@ depender del celular/Termux. Flujo:
      ya están en el historial), pasa automáticamente al siguiente canal
      de la lista hasta completar la cantidad de videos pedida (max_videos)
      o hasta agotar todos los canales.
-  4. Sube el texto TAL CUAL (crudo, sin parafrasear) a una carpeta de
-     Google Drive. El parafraseo con IA queda como un paso aparte,
-     opcional, para hacer después ya con el texto seguro en Drive.
-     Si se quiere volver a parafrasear en este mismo script, activar
-     la variable de entorno PARAFRASEAR=1.
+  4. Parafrasea (si PARAFRASEAR=1) con Groq (respaldo Gemini) y sube el
+     .txt final a una carpeta de Google Drive vía rclone.
   5. Guarda el ID de cada video procesado en descargados.txt para no
      repetirlo en corridas futuras.
 
 Requiere estas variables de entorno (Secrets del repo en GitHub Actions):
-    GDRIVE_CLIENT_ID
-    GDRIVE_CLIENT_SECRET
-    GDRIVE_REFRESH_TOKEN
     GROQ_API_KEY          (principal para parafrasear, si PARAFRASEAR=1)
     GROQ_API_KEY_2        (respaldo, opcional)
     GEMINI_API_KEY        (respaldo si Groq falla, opcional)
+
+Y que rclone ya esté configurado en el runner (remote "gdrive:", ver el
+paso "Configurar rclone" del workflow), en vez de pedir client_id/
+client_secret/refresh_token de Google directamente.
 
 v2.2: el parafraseo (cuando PARAFRASEAR=1) ahora usa Groq (Llama 3.3
 70B) como motor principal, igual que paraphrase_engine.py, en vez de
 Gemini. Gemini queda como respaldo si Groq falla (las dos keys) o si
 no hay GROQ_API_KEY cargada. Mismo prompt de corrección/parafraseo de
 antes, sin cambios en el criterio de reescritura.
+
+v2.3: se reemplazó la subida a Drive con la librería de Google
+(google-auth + googleapiclient), que dependía de un refresh token que
+se venció/revocó (RefreshError: invalid_grant), por rclone (comando
+"rclone copy"), reutilizando el mismo remote "gdrive:" ya autenticado
+que usa gameplay_slither.py. Ya no se necesitan los secrets
+GDRIVE_CLIENT_ID/GDRIVE_CLIENT_SECRET/GDRIVE_REFRESH_TOKEN.
 """
 
-import io
 import os
 import re
+import subprocess
 import sys
 import time
 
 import requests
 import yt_dlp
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 
 CARPETA_SALIDA = "transcripciones"
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
-DRIVE_FOLDER_NAME = "yt-download"
+# Carpeta destino en Drive, dentro del remote "gdrive:" de rclone
+# (mismo remote que ya usa gameplay_slither.py).
+DRIVE_REMOTE_PATH = "gdrive:yt-download"
 
 # ---------- Groq (motor principal de parafraseo) ----------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
@@ -346,37 +350,19 @@ def _vtt_a_texto(ruta_vtt):
     return " ".join(partes)
 
 
-def _cliente_drive():
-    creds = Credentials(
-        None,
-        refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
-        client_id=os.environ["GDRIVE_CLIENT_ID"],
-        client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token",
-    )
-    return build("drive", "v3", credentials=creds)
-
-
-def _id_carpeta_drive(servicio, nombre_carpeta):
-    q = (
-        f"name='{nombre_carpeta}' and mimeType='application/vnd.google-apps.folder' "
-        "and trashed=false"
-    )
-    resultado = servicio.files().list(q=q, fields="files(id)").execute()
-    archivos = resultado.get("files", [])
-    if archivos:
-        return archivos[0]["id"]
-    metadata = {"name": nombre_carpeta, "mimeType": "application/vnd.google-apps.folder"}
-    carpeta = servicio.files().create(body=metadata, fields="id").execute()
-    return carpeta["id"]
-
-
 def subir_a_drive(nombre_archivo, texto):
-    servicio = _cliente_drive()
-    carpeta_id = _id_carpeta_drive(servicio, DRIVE_FOLDER_NAME)
-    metadata = {"name": nombre_archivo, "parents": [carpeta_id]}
-    media = MediaIoBaseUpload(io.BytesIO(texto.encode("utf-8")), mimetype="text/plain")
-    servicio.files().create(body=metadata, media_body=media, fields="id").execute()
+    """Sube el .txt a Drive vía rclone (remote 'gdrive:'), en vez de la
+    API de Google directamente. Requiere rclone ya configurado en el
+    runner (ver paso 'Configurar rclone' del workflow)."""
+    ruta_local = os.path.join(CARPETA_SALIDA, nombre_archivo)
+    resultado = subprocess.run(
+        ["rclone", "copy", ruta_local, DRIVE_REMOTE_PATH, "-v"],
+        capture_output=True,
+        text=True,
+    )
+    if resultado.returncode != 0:
+        log(f"  ❌ rclone falló subiendo {nombre_archivo}: {resultado.stderr.strip()[:300]}")
+        raise RuntimeError(f"rclone copy falló para {nombre_archivo}")
     log(f"  ☁️  Subido a Drive: {nombre_archivo}")
 
 
