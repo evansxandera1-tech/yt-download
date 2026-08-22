@@ -16,11 +16,6 @@ on:
         required: false
         default: "5"
         type: string
-      limite_videos_prueba_gameplay:
-        description: "Gameplay: límite de videos solo para modo prueba (vacío = sin límite)"
-        required: false
-        default: ""
-        type: string
 permissions:
   contents: write
 jobs:
@@ -58,35 +53,3 @@ jobs:
           touch descargados.txt
           git add descargados.txt
           git diff --quiet && git diff --staged --quiet || (git commit -m "Actualizar historial de descargas" && git pull --rebase && git push)
-  descargar_gameplay:
-    runs-on: ubuntu-latest
-    timeout-minutes: 340
-    services:
-      bgutil-provider:
-        image: brainicism/bgutil-ytdlp-pot-provider
-        ports:
-          - 4416:4416
-    steps:
-      - name: Descargar repo
-        uses: actions/checkout@v4
-      - name: Configurar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Instalar dependencias
-        run: pip install -r requirements.txt
-      - name: Instalar ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Preparar cookies
-        run: |
-          echo "# Netscape HTTP Cookie File" > cookies.txt
-          echo "${{ secrets.YOUTUBE_COOKIES }}" >> cookies.txt
-          cp cookies.txt ~/cookies.txt
-      - name: Descargar gameplay
-        env:
-          DRIVE_CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
-          DRIVE_CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
-          DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          LIMITE_VIDEOS_PRUEBA: ${{ inputs.limite_videos_prueba_gameplay }}
-        run: python descargar_gameplay.py

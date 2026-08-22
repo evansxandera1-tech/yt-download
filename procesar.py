@@ -1,505 +1,464 @@
 """
-descargar_gameplay.py — v1.6
+yt-download — Descargar subtítulos, parafrasear con Groq y subir a Drive
+=============================================================================
+Versión: 2.2
 
-Descarga gameplay "sin copy" de canales de YouTube para usar como fondo
-de video, pensado para correr en GitHub Actions (sin depender del
-celular). Cada video se sube a Google Drive apenas termina de
-descargarse y se borra del runner al toque, porque el runner no tiene
-almacenamiento permanente.
+Pensado para correr dentro de GitHub Actions (workflow_dispatch), sin
+depender del celular/Termux. Flujo:
 
-FLUJO:
-  1) Baja historial_gameplay.json desde Drive (si existe).
-  2) Recorre los canales en CANALES, uno a la vez (vacía el canal
-     completo antes de pasar al siguiente).
-  3) Por cada video: si ya está "completo" en el historial, lo salta.
-     Si no, lo marca "en_progreso" y sube el historial YA (para que,
-     si el run se corta a la mitad, la próxima corrida sepa que ese
-     video quedó a medias y lo vuelva a intentar).
-  4) Descarga el video en máximo 1080p, lo clasifica por orientación
-     (vertical/horizontal) y lo sube a la subcarpeta correspondiente
-     en Drive, dentro de la carpeta del canal.
-  5) Marca el video "completo" en el historial y lo vuelve a subir.
-  6) Después de cada subida, si el total guardado en Drive supera
-     ALMACENAMIENTO_MAXIMO_BYTES, borra el/los video(s) más viejo(s)
-     ya completados hasta volver a estar bajo el tope (rotación).
-  7) Corta la corrida cuando lo descargado en ESTA corrida llega a
-     TOPE_BYTES_POR_CORRIDA (para no pasarse del tiempo de GitHub
-     Actions).
+  1. Recibe uno o varios canales/links de YouTube separados por coma (por
+     variable de entorno, pasada desde el input del workflow).
+  2. Lista los videos recientes de cada canal (o usa el video puntual si se
+     pasó un link directo) y baja el subtítulo automático en español de
+     cada uno con yt-dlp (sin descargar audio ni video).
+  3. Si un canal ya no tiene contenido nuevo (todos sus videos recientes
+     ya están en el historial), pasa automáticamente al siguiente canal
+     de la lista hasta completar la cantidad de videos pedida (max_videos)
+     o hasta agotar todos los canales.
+  4. Sube el texto TAL CUAL (crudo, sin parafrasear) a una carpeta de
+     Google Drive. El parafraseo con IA queda como un paso aparte,
+     opcional, para hacer después ya con el texto seguro en Drive.
+     Si se quiere volver a parafrasear en este mismo script, activar
+     la variable de entorno PARAFRASEAR=1.
+  5. Guarda el ID de cada video procesado en descargados.txt para no
+     repetirlo en corridas futuras.
 
-SECRETS necesarios en el repo de GitHub:
-  DRIVE_CLIENT_ID
-  DRIVE_CLIENT_SECRET
-  DRIVE_REFRESH_TOKEN
-  DRIVE_FOLDER_ID     (carpeta raíz en Drive donde se guarda todo)
-  YOUTUBE_COOKIES     (contenido del cookies.txt exportado del navegador,
-                       para que yt-dlp no choque con el bloqueo
-                       "Sign in to confirm you're not a bot")
+Requiere estas variables de entorno (Secrets del repo en GitHub Actions):
+    GDRIVE_CLIENT_ID
+    GDRIVE_CLIENT_SECRET
+    GDRIVE_REFRESH_TOKEN
+    GROQ_API_KEY          (principal para parafrasear, si PARAFRASEAR=1)
+    GROQ_API_KEY_2        (respaldo, opcional)
+    GEMINI_API_KEY        (respaldo si Groq falla, opcional)
 
-v1.0: primera versión, separada del módulo de gameplay de
-transcribir_web.py, adaptada para correr en GitHub Actions + Drive
-en vez de Termux + almacenamiento local.
-
-v1.1: ahora chequea la orientación del video ANTES de descargarlo
-(sin gastar tiempo/datos en algo que se iba a descartar) y solo
-guarda horizontales; los verticales se marcan "omitido_vertical" en
-el historial para no volver a chequearlos. Se sacó la subcarpeta
-vertical/horizontal en Drive ya que todo lo guardado es horizontal.
-
-v1.2: los videos estaban llegando a Drive en baja calidad porque sin
-un PO Token válido YouTube le entrega a yt-dlp solo formatos de baja
-resolución (a veces 360p) para los clients tv/android/web. Se agregó
-soporte para un servidor bgutil-ytdlp-pot-provider (corre como
-service del workflow, puerto 4416) que genera el PO Token y permite
-acceder a los formatos de hasta 1080p.
-
-v1.3: el tope de 12 GB se estaba entendiendo mal: con solo 60 videos
-recientes por canal como candidatos, en una o pocas corridas se
-agotaba el pool completo (quedaba todo "completo" en el historial) y
-las corridas siguientes ya no tenían nada nuevo para bajar, aunque
-Drive no estuviera lleno de verdad. Se cambia el enfoque: ahora Drive
-funciona como un buffer rotativo de tamaño fijo (ALMACENAMIENTO_MAXIMO_
-BYTES). Cuando se sube un video nuevo y esto hace que el total
-guardado supere el tope, se borra el video más viejo ya completado
-(de Drive y del historial) para hacerle lugar. Así, mientras el canal
-siga subiendo contenido nuevo, el script siempre tiene dónde
-descargar, sin que el Drive crezca sin control.
-
-v1.4: YouTube empezó a forzar "SABR streaming", lo que rompe la
-mayoría de los formatos que pedía yt-dlp incluso con el PO Token del
-bgutil-provider funcionando bien (error "Requested format is not
-available" en casi todos los videos). Se agregó el argumento
-extractor_args["youtube"]["formats"] = ["missing_pot"], que le
-permite a yt-dlp usar formatos aunque falte el PO token en vez de
-descartarlos de plano.
-
-v1.5: el fix de v1.4 no fue suficiente porque el problema real es el
-protocolo SABR que YouTube está forzando ahora (bloquea los formatos
-viejos directamente, no es solo un tema de PO Token). Se agregó
-soporte para el plugin yt-dlp-ytse (hay que instalarlo aparte con
-"pip install -U yt-dlp-ytse" en el workflow) y se cambió el
-extractor_args de "formats": ["missing_pot"] a "formats": ["sabr"],
-que habilita el protocolo nuevo. También se agregó un corte de
-seguridad: si se acumulan 5 descargas fallidas seguidas, la corrida
-se corta sola en vez de seguir insistiendo video por video (antes
-antes se probaba TODO el pool de 60 videos aunque todos fallaran por
-el mismo motivo).
-
-v1.6: el modo "sabr" del plugin yt-dlp-ytse necesita el cliente
-"mweb" para funcionar bien (la propia documentación del plugin lo
-recomienda); con "tv"/"android"/"web" seguía sin encontrar formatos
-aunque el plugin ya estaba cargando bien. Se cambió player_client a
-["mweb"] en los dos lugares donde se arma la config de yt-dlp.
+v2.2: el parafraseo (cuando PARAFRASEAR=1) ahora usa Groq (Llama 3.3
+70B) como motor principal, igual que paraphrase_engine.py, en vez de
+Gemini. Gemini queda como respaldo si Groq falla (las dos keys) o si
+no hay GROQ_API_KEY cargada. Mismo prompt de corrección/parafraseo de
+antes, sin cambios en el criterio de reescritura.
 """
 
 import io
-import json
 import os
+import re
 import sys
 import time
-import traceback
 
+import requests
 import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload
 
-# --------------------------------------------------------------------
-# CONFIG
-# --------------------------------------------------------------------
+CARPETA_SALIDA = "transcripciones"
+os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
-CANALES = [
-    "https://youtube.com/@orbitalncg",
-    "https://youtube.com/@dopegameplays",
+DRIVE_FOLDER_NAME = "yt-download"
+
+# ---------- Groq (motor principal de parafraseo) ----------
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2", "").strip()
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MAX_REINTENTOS_GROQ = 3
+
+# ---------- Gemini (respaldo, solo si Groq falla o no hay key) ----------
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODELO = os.environ.get("GEMINI_MODELO", "gemini-3.6-flash").strip()
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELO}:generateContent"
+)
+GEMINI_TIMEOUT_SEG = 240
+
+PROMPT_PARAFRASEAR = """Sos un editor de guiones en español. Te paso el subtítulo automático de un video de YouTube, que puede tener palabras mal reconocidas o mal puntuadas.
+
+Tu tarea, en un solo paso:
+1. Corregí los errores de reconocimiento (palabras que claramente están mal, cortadas o repetidas por ser subtítulo automático).
+2. Reescribí el texto cambiando palabras (sinónimos) y la estructura de las oraciones, manteniendo EXACTAMENTE la misma historia, los mismos hechos y el mismo sentido. No inventes ni agregues información nueva.
+3. NO resumas ni acortes el texto: el guion final debe cubrir todos los mismos hechos, momentos y detalles del original, con una extensión similar (no una versión condensada).
+4. Puntuá el texto pensando en que lo va a leer una voz sintética: usá comas para pausas cortas, puntos entre ideas, evitá oraciones de más de 20 palabras, y evitá paréntesis, guiones largos o comillas anidadas que puedan confundir a un lector de voz.
+5. Releélo una vez antes de responder y corregí frases repetidas o puntuación que no ayude a una lectura natural en voz alta.
+6. Devolvé ÚNICAMENTE el guion final en texto corrido. No agregues notas, comentarios, encabezados, aclaraciones sobre el formato, ni ningún texto que no sea parte de la historia misma. Tu respuesta debe terminar en el último punto de la historia, sin nada después.
+
+Subtítulo original:
+{texto}"""
+
+
+_PATRONES_ARTEFACTO = [
+    r"\n\s*\*+\s*\*?.*$",
+    r"\n\s*(Nota|Draft(ing)?|Aclaraci[oó]n)[:\-].*$",
 ]
 
-CALIDAD_MAXIMA = 1080  # alto máximo en píxeles
 
-# Cuánto se descarga como máximo EN UNA SOLA CORRIDA (para no pasarse
-# del tiempo/recursos de GitHub Actions). No es el tope de Drive.
-TOPE_BYTES_POR_CORRIDA = 12 * 1024 ** 3  # 12 GB por corrida
+def _limpiar_artefactos(texto):
+    limpio = texto
+    for patron in _PATRONES_ARTEFACTO:
+        limpio = re.sub(patron, "", limpio, flags=re.IGNORECASE | re.DOTALL)
+    return limpio.strip()
 
-# Cuánto gameplay se mantiene guardado en Drive EN TOTAL. Si al subir
-# un video nuevo se supera esto, se borra el más viejo para hacerle
-# lugar (rotación). Podés subir este número si querés más backlog
-# disponible para Story Engine.
-ALMACENAMIENTO_MAXIMO_BYTES = 12 * 1024 ** 3  # 12 GB totales en Drive
-
-LIMITE_VIDEOS_POR_CANAL = 60  # cuántos videos recientes revisa por canal
-
-HISTORIAL_NOMBRE = "historial_gameplay.json"
-COOKIES_PATH = os.path.expanduser("~/cookies.txt")
-CARPETA_TEMP = os.path.expanduser("~/gameplay_dl_temp")
-
-DRIVE_FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
-
-
-# --------------------------------------------------------------------
-# LOG
-# --------------------------------------------------------------------
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[yt-download] {msg}", flush=True)
 
 
-# --------------------------------------------------------------------
-# DRIVE
-# --------------------------------------------------------------------
+def _llamar_groq(texto, api_key):
+    body = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": PROMPT_PARAFRASEAR.format(texto=texto)}],
+        "temperature": 0.7,
+    }
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
+            timeout=60,
+        )
+    except requests.exceptions.RequestException as e:
+        log(f"  ⚠️  Error de red llamando a Groq: {e}")
+        return None
+    if resp.status_code == 200:
+        return resp.json()["choices"][0]["message"]["content"]
+    log(f"  ⚠️  Groq error {resp.status_code}: {resp.text[:200]}")
+    return None
 
-def conectar_drive():
+
+def _llamar_gemini(texto):
+    if not GEMINI_API_KEY:
+        return None
+    body = {
+        "contents": [{"parts": [{"text": PROMPT_PARAFRASEAR.format(texto=texto)}]}],
+        "generationConfig": {"maxOutputTokens": 32768},
+    }
+
+    ultimo_error = None
+    for intento in range(1, 6):
+        try:
+            resp = requests.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=body,
+                timeout=GEMINI_TIMEOUT_SEG,
+            )
+            if resp.status_code == 429:
+                espera = 20 * intento
+                log(f"  ⏳ Gemini: límite de peticiones (429). Esperando {espera}s antes de reintentar ({intento}/5)...")
+                time.sleep(espera)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.RequestException as e:
+            ultimo_error = e
+            log(f"  ⚠️  Error llamando a Gemini (intento {intento}/5): {e}")
+            time.sleep(10 * intento)
+    else:
+        log(f"  ❌ Gemini no respondió tras varios intentos ({ultimo_error}).")
+        return None
+
+    candidatos = data.get("candidates") or []
+    if not candidatos:
+        motivo = data.get("promptFeedback", {}).get("blockReason", "desconocido")
+        log(f"  ⚠️  Gemini no devolvió candidatos (motivo: {motivo}).")
+        return None
+
+    candidato = candidatos[0]
+    finish_reason = candidato.get("finishReason", "")
+    if finish_reason == "MAX_TOKENS":
+        log("  ⚠️  Gemini cortó la respuesta por límite de tokens de salida (MAX_TOKENS). El bloque puede haber quedado incompleto.")
+
+    partes = candidato.get("content", {}).get("parts")
+    if not partes:
+        motivo = finish_reason or "desconocido"
+        log(f"  ⚠️  Gemini devolvió una respuesta sin contenido (finishReason: {motivo}).")
+        return None
+
+    return partes[0].get("text", "").strip()
+
+
+def _corregir_bloque(bloque):
+    """Groq (con las 2 keys, con reintentos) primero; Gemini de respaldo si todo falla."""
+    for api_key in [k for k in (GROQ_API_KEY, GROQ_API_KEY_2) if k]:
+        for intento in range(1, MAX_REINTENTOS_GROQ + 1):
+            resultado = _llamar_groq(bloque, api_key)
+            if resultado and resultado.strip():
+                return _limpiar_artefactos(resultado)
+            log(f"  ⏳ Groq intento {intento}/{MAX_REINTENTOS_GROQ} sin resultado válido, reintentando...")
+            time.sleep(3)
+
+    log("  ⚠️  Groq falló (o sin GROQ_API_KEY), probando con Gemini de respaldo...")
+    resultado = _llamar_gemini(bloque)
+    if resultado and resultado.strip():
+        return _limpiar_artefactos(resultado)
+
+    log("  ❌ Groq y Gemini fallaron para este bloque. Se usa el texto sin cambios.")
+    return bloque
+
+
+PALABRAS_POR_PARTE = 2200
+PAUSA_ENTRE_LLAMADAS_SEG = 8
+
+
+def _partir_en_bloques(texto, palabras_por_parte=PALABRAS_POR_PARTE):
+    oraciones = re.split(r"(?<=[.!?])\s+", texto)
+    bloques = []
+    actual = []
+    palabras_actual = 0
+    for oracion in oraciones:
+        n = len(oracion.split())
+        if palabras_actual + n > palabras_por_parte and actual:
+            bloques.append(" ".join(actual))
+            actual = []
+            palabras_actual = 0
+        actual.append(oracion)
+        palabras_actual += n
+    if actual:
+        bloques.append(" ".join(actual))
+    return bloques
+
+
+def parafrasear(texto_crudo):
+    if not GROQ_API_KEY and not GEMINI_API_KEY:
+        log("⚠️  Sin GROQ_API_KEY ni GEMINI_API_KEY, se sube el subtítulo tal cual (sin parafrasear)")
+        return texto_crudo
+
+    bloques = _partir_en_bloques(texto_crudo)
+    if len(bloques) > 1:
+        log(f"Texto largo: se divide en {len(bloques)} parte(s) para parafrasear sin perder contenido")
+
+    partes_finales = []
+    for i, bloque in enumerate(bloques, start=1):
+        if len(bloques) > 1:
+            log(f"  Parte {i}/{len(bloques)}: parafraseando...")
+        else:
+            log("Parafraseando...")
+        texto = _corregir_bloque(bloque)
+        partes_finales.append(texto.strip())
+        if i < len(bloques):
+            time.sleep(PAUSA_ENTRE_LLAMADAS_SEG)
+
+    return " ".join(partes_finales)
+
+
+def _extraer_nombre_canal(url):
+    url = url.split("?")[0].strip().rstrip("/")
+    return url
+
+
+def es_link_de_video(url):
+    return "watch?v=" in url or "youtu.be/" in url or "/shorts/" in url
+
+
+COOKIES_PATH = "cookies.txt"
+
+
+def _opts_cookies():
+    if os.path.isfile(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
+        return {"cookiefile": COOKIES_PATH}
+    return {}
+
+
+def _opts_base():
+    return {
+        "ignore_no_formats_error": True,
+        "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
+    }
+
+
+def listar_videos_canal(url_canal, max_videos):
+    url_videos = _extraer_nombre_canal(url_canal)
+    if not url_videos.endswith("/videos"):
+        url_videos += "/videos"
+    opts = {
+        "extract_flat": True,
+        "playlistend": max_videos,
+        "quiet": True,
+        **_opts_base(),
+        "extractor_args": {
+            "youtubetab": {"skip": ["authcheck"]},
+            **_opts_base()["extractor_args"],
+        },
+        **_opts_cookies(),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url_videos, download=False)
+    entradas = info.get("entries", []) or []
+    videos = []
+    for e in entradas:
+        if not e:
+            continue
+        duracion = e.get("duration") or 0
+        video_url = e.get("url") or f"https://www.youtube.com/watch?v={e.get('id')}"
+        if duracion and duracion <= 60:
+            continue
+        if "/shorts/" in video_url:
+            continue
+        videos.append({"id": e.get("id"), "title": e.get("title", "sin_titulo"), "url": video_url})
+        if len(videos) >= max_videos:
+            break
+    return videos
+
+
+def bajar_subtitulo(video_url):
+    opts = {
+        "skip_download": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["es", "es-419", "es-ES"],
+        "subtitlesformat": "vtt",
+        "outtmpl": os.path.join(CARPETA_SALIDA, "%(id)s.%(ext)s"),
+        "quiet": True,
+        **_opts_base(),
+        **_opts_cookies(),
+    }
+    ultimo_error = None
+    for intento in range(1, 4):
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+            video_id = info.get("id")
+            for archivo in os.listdir(CARPETA_SALIDA):
+                if archivo.startswith(video_id) and archivo.endswith(".vtt"):
+                    ruta = os.path.join(CARPETA_SALIDA, archivo)
+                    texto = _vtt_a_texto(ruta)
+                    os.remove(ruta)
+                    return texto
+            return None
+        except Exception as e:
+            ultimo_error = e
+            log(f"  ⚠️  Intento {intento}/3 falló: {e}")
+            time.sleep(5 * intento)
+    log(f"  ❌ No se pudo bajar el subtítulo: {ultimo_error}")
+    return None
+
+
+def _vtt_a_texto(ruta_vtt):
+    with open(ruta_vtt, "r", encoding="utf-8") as f:
+        lineas = f.readlines()
+    vistas = set()
+    partes = []
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea or "-->" in linea or linea.startswith(("WEBVTT", "Kind:", "Language:")):
+            continue
+        linea = re.sub(r"<[^>]+>", "", linea)
+        if linea and linea not in vistas:
+            vistas.add(linea)
+            partes.append(linea)
+    return " ".join(partes)
+
+
+def _cliente_drive():
     creds = Credentials(
         None,
-        refresh_token=os.environ["DRIVE_REFRESH_TOKEN"],
-        client_id=os.environ["DRIVE_CLIENT_ID"],
-        client_secret=os.environ["DRIVE_CLIENT_SECRET"],
+        refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
+        client_id=os.environ["GDRIVE_CLIENT_ID"],
+        client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
         token_uri="https://oauth2.googleapis.com/token",
     )
     return build("drive", "v3", credentials=creds)
 
 
-def _buscar_archivo(drive, nombre, carpeta_padre_id):
-    query = (
-        f"name='{nombre}' and '{carpeta_padre_id}' in parents "
-        f"and trashed=false"
+def _id_carpeta_drive(servicio, nombre_carpeta):
+    q = (
+        f"name='{nombre_carpeta}' and mimeType='application/vnd.google-apps.folder' "
+        "and trashed=false"
     )
-    resultado = drive.files().list(q=query, fields="files(id,name)").execute()
-    archivos = resultado.get("files", [])
-    return archivos[0]["id"] if archivos else None
-
-
-def obtener_o_crear_carpeta(drive, nombre, carpeta_padre_id):
-    query = (
-        f"name='{nombre}' and '{carpeta_padre_id}' in parents "
-        f"and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    )
-    resultado = drive.files().list(q=query, fields="files(id,name)").execute()
+    resultado = servicio.files().list(q=q, fields="files(id)").execute()
     archivos = resultado.get("files", [])
     if archivos:
         return archivos[0]["id"]
-    metadata = {
-        "name": nombre,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [carpeta_padre_id],
-    }
-    carpeta = drive.files().create(body=metadata, fields="id").execute()
+    metadata = {"name": nombre_carpeta, "mimeType": "application/vnd.google-apps.folder"}
+    carpeta = servicio.files().create(body=metadata, fields="id").execute()
     return carpeta["id"]
 
 
-def descargar_historial(drive):
-    file_id = _buscar_archivo(drive, HISTORIAL_NOMBRE, DRIVE_FOLDER_ID)
-    if not file_id:
-        log("No hay historial previo en Drive, arranca uno nuevo.")
-        return {}, None
-
-    request = drive.files().get_media(fileId=file_id)
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    listo = False
-    while not listo:
-        _, listo = downloader.next_chunk()
-    buffer.seek(0)
-    historial = json.loads(buffer.read().decode("utf-8"))
-
-    en_progreso = [v for v, d in historial.items() if d.get("estado") == "en_progreso"]
-    if en_progreso:
-        log(f"{len(en_progreso)} video(s) habían quedado a medias, se reintentan.")
-    log(f"Historial cargado desde Drive: {len(historial)} video(s) registrados.")
-    return historial, file_id
+def subir_a_drive(nombre_archivo, texto):
+    servicio = _cliente_drive()
+    carpeta_id = _id_carpeta_drive(servicio, DRIVE_FOLDER_NAME)
+    metadata = {"name": nombre_archivo, "parents": [carpeta_id]}
+    media = MediaIoBaseUpload(io.BytesIO(texto.encode("utf-8")), mimetype="text/plain")
+    servicio.files().create(body=metadata, media_body=media, fields="id").execute()
+    log(f"  ☁️  Subido a Drive: {nombre_archivo}")
 
 
-def subir_historial(drive, historial, file_id):
-    contenido = json.dumps(historial, ensure_ascii=False, indent=2).encode("utf-8")
-    media = MediaIoBaseUpload(io.BytesIO(contenido), mimetype="application/json")
-    if file_id:
-        drive.files().update(fileId=file_id, media_body=media).execute()
-    else:
-        metadata = {"name": HISTORIAL_NOMBRE, "parents": [DRIVE_FOLDER_ID]}
-        creado = drive.files().create(body=metadata, media_body=media, fields="id").execute()
-        file_id = creado["id"]
-    return file_id
+def _nombre_archivo_valido(titulo, video_id):
+    limpio = re.sub(r"[^\w\s-]", "", titulo).strip().replace(" ", "_")[:80]
+    return f"{limpio}__{video_id}.txt"
 
 
-def subir_video(drive, ruta_local, nombre_archivo, carpeta_destino_id):
-    metadata = {"name": nombre_archivo, "parents": [carpeta_destino_id]}
-    media = MediaFileUpload(ruta_local, mimetype="video/mp4", resumable=True)
-    creado = drive.files().create(body=metadata, media_body=media, fields="id").execute()
-    return creado["id"]
+HISTORIAL_PATH = "descargados.txt"
 
 
-def borrar_video_drive(drive, file_id):
-    try:
-        drive.files().delete(fileId=file_id).execute()
-        return True
-    except Exception as e:
-        log(f"    ⚠️ No se pudo borrar de Drive ({file_id}): {e}")
-        return False
+def _cargar_historial():
+    if not os.path.isfile(HISTORIAL_PATH):
+        return set()
+    with open(HISTORIAL_PATH, "r", encoding="utf-8") as f:
+        return {linea.strip() for linea in f if linea.strip()}
 
 
-# --------------------------------------------------------------------
-# ROTACIÓN DE ESPACIO
-# --------------------------------------------------------------------
-
-def _total_guardado_bytes(historial):
-    total = 0
-    for datos in historial.values():
-        if datos.get("estado") == "completo":
-            total += datos.get("tamano_mb", 0) * 1024 * 1024
-    return total
+def _marcar_como_descargado(video_id):
+    with open(HISTORIAL_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{video_id}\n")
 
 
-def liberar_espacio(drive, historial, historial_id, presupuesto_bytes):
-    """Si lo guardado en Drive supera presupuesto_bytes, borra los
-    videos más viejos ya completados (en orden de finalización) hasta
-    volver a estar por debajo del tope."""
-    total = _total_guardado_bytes(historial)
-    if total <= presupuesto_bytes:
-        return historial_id
+PARAFRASEAR = os.environ.get("PARAFRASEAR", "0").strip() == "1"
 
-    # Recorre el historial en el orden en que fue quedando "completo"
-    # (los dicts en Python respetan el orden de inserción).
-    for video_id, datos in list(historial.items()):
-        if total <= presupuesto_bytes:
-            break
-        if datos.get("estado") != "completo":
-            continue
-
-        file_id = datos.get("drive_file_id")
-        titulo = datos.get("titulo", video_id)
-        if file_id and borrar_video_drive(drive, file_id):
-            total -= datos.get("tamano_mb", 0) * 1024 * 1024
-            historial[video_id]["estado"] = "borrado_por_espacio"
-            historial[video_id].pop("drive_file_id", None)
-            log(f"    🗑️ Borrado por rotación (el más viejo): {titulo}")
-
-    return subir_historial(drive, historial, historial_id)
-
-
-# --------------------------------------------------------------------
-# YT-DLP
-# --------------------------------------------------------------------
-
-def _opciones_comunes():
-    opciones = {
-        "quiet": True,
-        "no_warnings": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb"],
-                "formats": ["sabr"],
-            },
-            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
-        },
-        "retries": 5,
-        "fragment_retries": 5,
-        "sleep_interval_requests": 1,
-    }
-    if os.path.exists(COOKIES_PATH):
-        opciones["cookiefile"] = COOKIES_PATH
-    return opciones
-
-
-def listar_videos_canal(url_canal, limite):
-    url_videos = url_canal.rstrip("/")
-    if not url_videos.endswith("/videos"):
-        url_videos += "/videos"
-
-    opciones = _opciones_comunes()
-    opciones.update({
-        "extract_flat": True,
-        "playlistend": limite,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb"],
-                "formats": ["sabr"],
-            },
-            "youtubetab": {"skip": ["authcheck"]},
-        },
-    })
-
-    with yt_dlp.YoutubeDL(opciones) as ydl:
-        info = ydl.extract_info(url_videos, download=False)
-
-    videos = []
-    for entrada in (info or {}).get("entries") or []:
-        url_entrada = entrada.get("url") or entrada.get("webpage_url") or ""
-        if "/shorts/" in url_entrada:
-            continue
-        duracion = entrada.get("duration")
-        if duracion is not None and duracion <= 60:
-            continue
-        video_id = entrada.get("id")
-        if not video_id:
-            continue
-        videos.append({"video_id": video_id, "titulo": entrada.get("title") or video_id})
-    return videos
-
-
-def obtener_dimensiones(video_id):
-    """Consulta metadata del video (sin descargarlo) para saber si es
-    horizontal o vertical antes de gastar tiempo/datos bajándolo."""
-    opciones = _opciones_comunes()
-    opciones.update({"skip_download": True})
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(opciones) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info.get("width"), info.get("height")
-
-
-def descargar_video(video_id, nombre_salida):
-    # bestaudio = se baja el audio original tal cual lo tiene YouTube, sin
-    # tocarlo. Para el video, format_sort prioriza primero la resolución
-    # (1080p tope) y después el codec más eficiente (av1/vp9 pesan menos
-    # que h264 para la misma nitidez); si el canal no tiene esos codecs,
-    # cae a lo que haya disponible en esa resolución.
-    formato = f"bestvideo[height<={CALIDAD_MAXIMA}]+bestaudio/best[height<={CALIDAD_MAXIMA}]/best"
-    opciones = _opciones_comunes()
-    opciones.update({
-        "format": formato,
-        "format_sort": ["res:1080", "vcodec:av01:vp9.2:vp9", "br"],
-        "merge_output_format": "mp4",
-        "outtmpl": nombre_salida,
-    })
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(opciones) as ydl:
-        info = ydl.extract_info(url, download=True)
-    return info.get("width"), info.get("height")
-
-
-def _sanear_nombre_archivo(texto, largo_max=80):
-    limpio = "".join(c for c in texto if c.isalnum() or c in " -_").strip()
-    return limpio[:largo_max] or "video"
-
-
-# --------------------------------------------------------------------
-# PRINCIPAL
-# --------------------------------------------------------------------
 
 def main():
-    os.makedirs(CARPETA_TEMP, exist_ok=True)
-    drive = conectar_drive()
-    historial, historial_id = descargar_historial(drive)
+    if len(sys.argv) < 2:
+        log("Uso: python procesar.py <canal_o_link>[,<canal2>,<canal3>,...] [max_videos]")
+        sys.exit(1)
+    entrada = sys.argv[1].strip()
+    max_videos = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    canales = [c.strip() for c in entrada.split(",") if c.strip()]
 
-    limite_prueba = os.environ.get("LIMITE_VIDEOS_PRUEBA")
-    limite_prueba = int(limite_prueba) if limite_prueba else None
-    if limite_prueba:
-        log(f"MODO PRUEBA: se corta después de {limite_prueba} video(s).")
+    historial = _cargar_historial()
+    log(f"Historial: {len(historial)} video(s) ya procesados antes")
+    log("Modo: subir texto CRUDO (sin parafrasear)" if not PARAFRASEAR else "Modo: parafrasear (Groq, respaldo Gemini) antes de subir")
+    log(f"Canales en la lista: {len(canales)} — objetivo: {max_videos} video(s) en total")
 
-    total_bytes_corrida = 0
-    videos_descargados = 0
-    tope_alcanzado = False
-    fallos_seguidos = 0
-    LIMITE_FALLOS_SEGUIDOS = 5
-
-    for url_canal in CANALES:
-        if tope_alcanzado:
+    procesados = 0
+    for idx_canal, canal_o_link in enumerate(canales, start=1):
+        if procesados >= max_videos:
             break
+        restantes = max_videos - procesados
 
-        nombre_canal = url_canal.rstrip("/").split("/")[-1].lstrip("@")
-        log(f"=== Canal: {nombre_canal} ===")
+        if es_link_de_video(canal_o_link):
+            videos = [{"id": None, "title": "video", "url": canal_o_link}]
+        else:
+            log(f"[canal {idx_canal}/{len(canales)}] Listando videos recientes de: {canal_o_link}")
+            videos = listar_videos_canal(canal_o_link, restantes * 3)
+            videos = [v for v in videos if v["id"] not in historial][:restantes]
 
-        try:
-            videos = listar_videos_canal(url_canal, LIMITE_VIDEOS_POR_CANAL)
-        except Exception as e:
-            log(f"  ❌ No se pudo listar el canal: {type(e).__name__}: {e}")
+        if not videos:
+            log("  Sin contenido nuevo en este canal. Se pasa al siguiente.")
             continue
 
-        carpeta_canal_id = obtener_o_crear_carpeta(drive, nombre_canal, DRIVE_FOLDER_ID)
-
-        for video in videos:
-            if tope_alcanzado:
+        for i, video in enumerate(videos, start=1):
+            log(f"--- Video {i}/{len(videos)} ({canal_o_link}): {video['title']} ---")
+            texto_crudo = bajar_subtitulo(video["url"])
+            if not texto_crudo:
+                log("  Sin subtítulo disponible, se saltea.")
+                continue
+            if PARAFRASEAR:
+                texto_final = parafrasear(texto_crudo)
+            else:
+                texto_final = texto_crudo
+            video_id = video["id"] or "video"
+            nombre_archivo = _nombre_archivo_valido(video["title"], video_id)
+            ruta_local = os.path.join(CARPETA_SALIDA, nombre_archivo)
+            with open(ruta_local, "w", encoding="utf-8") as f:
+                f.write(texto_final)
+            subir_a_drive(nombre_archivo, texto_final)
+            if video["id"]:
+                _marcar_como_descargado(video["id"])
+            procesados += 1
+            if procesados >= max_videos:
                 break
 
-            video_id = video["video_id"]
-            titulo = video["titulo"]
-            registro = historial.get(video_id)
-
-            # "borrado_por_espacio" también se salta: ya se usó una vez,
-            # no lo volvemos a bajar en la misma corrida/ventana de 60.
-            if registro and registro.get("estado") in (
-                "completo", "omitido_vertical", "borrado_por_espacio"
-            ):
-                continue
-
-            try:
-                ancho, alto = obtener_dimensiones(video_id)
-            except Exception as e:
-                log(f"  ⚠️ No se pudo chequear orientación de '{titulo}': {e}")
-                fallos_seguidos += 1
-                if fallos_seguidos >= LIMITE_FALLOS_SEGUIDOS:
-                    log(f"  🛑 {LIMITE_FALLOS_SEGUIDOS} fallos seguidos, se corta la corrida "
-                        f"(probablemente YouTube está bloqueando las descargas ahora mismo).")
-                    tope_alcanzado = True
-                continue
-
-            if ancho and alto and alto > ancho:
-                log(f"  ⏭️ Saltado (vertical): {titulo}")
-                historial[video_id] = {
-                    "canal": nombre_canal,
-                    "titulo": titulo,
-                    "estado": "omitido_vertical",
-                }
-                historial_id = subir_historial(drive, historial, historial_id)
-                continue
-
-            log(f"  → {titulo}")
-            historial[video_id] = {
-                "canal": nombre_canal,
-                "titulo": titulo,
-                "estado": "en_progreso",
-            }
-            historial_id = subir_historial(drive, historial, historial_id)
-
-            ruta_temp = os.path.join(CARPETA_TEMP, f"{video_id}.mp4")
-            try:
-                descargar_video(video_id, ruta_temp)
-                if not os.path.exists(ruta_temp):
-                    raise RuntimeError("la descarga no generó el archivo esperado")
-
-                tamano_bytes = os.path.getsize(ruta_temp)
-                nombre_final = f"{video_id}__{_sanear_nombre_archivo(titulo)}.mp4"
-
-                log(f"    Subiendo a Drive ({round(tamano_bytes / (1024 * 1024), 1)} MB)...")
-                drive_file_id = subir_video(drive, ruta_temp, nombre_final, carpeta_canal_id)
-
-                historial[video_id]["estado"] = "completo"
-                historial[video_id]["tamano_mb"] = round(tamano_bytes / (1024 * 1024), 1)
-                historial[video_id]["drive_file_id"] = drive_file_id
-                historial_id = subir_historial(drive, historial, historial_id)
-
-                total_bytes_corrida += tamano_bytes
-                videos_descargados += 1
-                fallos_seguidos = 0
-                log(f"    ✅ Listo ({nombre_canal}). "
-                    f"Acumulado esta corrida: {round(total_bytes_corrida / (1024 ** 3), 2)} GB")
-
-                # Rotación: si con este video se pasó el tope total de
-                # Drive, borra el/los más viejo(s) para hacerle lugar.
-                historial_id = liberar_espacio(
-                    drive, historial, historial_id, ALMACENAMIENTO_MAXIMO_BYTES
-                )
-
-            except Exception as e:
-                log(f"    ❌ Error: {type(e).__name__}: {e}")
-                traceback.print_exc()
-                # Se deja "en_progreso" en el historial a propósito: la
-                # próxima corrida lo va a reintentar.
-                fallos_seguidos += 1
-                if fallos_seguidos >= LIMITE_FALLOS_SEGUIDOS:
-                    log(f"    🛑 {LIMITE_FALLOS_SEGUIDOS} fallos seguidos, se corta la corrida "
-                        f"(probablemente YouTube está bloqueando las descargas ahora mismo).")
-                    tope_alcanzado = True
-            finally:
-                if os.path.exists(ruta_temp):
-                    os.remove(ruta_temp)
-
-            if total_bytes_corrida >= TOPE_BYTES_POR_CORRIDA:
-                log(f"Tope de {TOPE_BYTES_POR_CORRIDA / (1024 ** 3):.0f} GB por corrida "
-                    f"alcanzado, se corta la corrida.")
-                tope_alcanzado = True
-            elif limite_prueba and videos_descargados >= limite_prueba:
-                log("Límite de prueba alcanzado, se corta la corrida.")
-                tope_alcanzado = True
-
-    log("=== Fin de la corrida ===")
+    if procesados == 0:
+        log("No hay videos nuevos para procesar en ningún canal de la lista.")
+    else:
+        log(f"Listo. {procesados} video(s) procesado(s) en total.")
 
 
 if __name__ == "__main__":
