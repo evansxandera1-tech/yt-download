@@ -50,7 +50,7 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PARAFRASEAR: "0"
-        run: python procesar.py "https://youtube.com/@relatosredditx,https://youtube.com/@historiasredditya,https://youtube.com/@renatahistorias,https://youtube.com/@dosisdesubforos-b1w9z" "${{ inputs.max_videos || '30' }}"
+        run: python procesar.py "${{ secrets.CANALES_YT }}" "${{ inputs.max_videos || '30' }}"
       - name: Guardar historial
         run: |
           git config --global user.name "GitHub Actions Bot"

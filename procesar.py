@@ -60,7 +60,7 @@ os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
 # Carpeta destino en Drive, dentro del remote "gdrive:" de rclone
 # (mismo remote que ya usa gameplay_slither.py).
-DRIVE_REMOTE_PATH = "gdrive:yt-download"
+DRIVE_REMOTE_PATH = "gdrive3:temas"
 
 # ---------- Groq (motor principal de parafraseo) ----------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
